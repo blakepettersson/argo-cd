@@ -603,6 +603,49 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 	endpoint, err := redisContainer.Endpoint(ctx, "")
 	CheckError(err)
 
+	t.Setenv("REDIS_SERVER", endpoint)
+
+	serverFlags := pflag.NewFlagSet("", pflag.PanicOnError)
+	err = serverFlags.Parse([]string{})
+	CheckError(err)
+	serverConfig := servercommand.NewServerConfig(serverFlags, serverFlags).WithDefaultFlags().WithK8sSettings(namespace.Name, rest.CopyConfig(config))
+
+	err = serverFlags.Set("port", strings.Split(apiServerAddress, ":")[1])
+	CheckError(err)
+
+	_ = serverConfig.CreateServer(ctx)
+
+	appControllerFlags := pflag.NewFlagSet("", pflag.PanicOnError)
+	_ = appcontrollercommand.NewApplicationControllerConfig(appControllerFlags, appControllerFlags).WithDefaultFlags().WithK8sSettings(namespace.Name, config)
+
+	req := testcontainers.ContainerRequest{
+		Image:        "argocd-e2e-cluster:latest",
+		ExposedPorts: []string{"2222:2222/tcp", "9080:9080/tcp", "9081:9081/tcp", "9443:9443/tcp", "9444:9444/tcp"},
+		Cmd:          []string{"goreman", "start"},
+	}
+
+	_, err = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	CheckError(err)
+
+	FailOnErr(Run("", "mkdir", "-p", TmpDir+"/app/config"))
+
+	kubeConfigPath := TmpDir + "/app/config/kubeconfig"
+	CheckError(err)
+
+	err = os.WriteFile(kubeConfigPath, kubeConfigYaml, 0666)
+	CheckError(err)
+
+	os.Setenv("KUBECONFIG", kubeConfigPath)
+
+	/*
+		go func() {
+			err = appcontrollerConfig.CreateApplicationController(ctx)
+			CheckError(err)
+		}()*/
+
 	// delete resources
 	// kubectl delete apps --all
 
@@ -630,26 +673,6 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 		FailOnErr(Run("", "kubectl", "delete", "crd", "-l", TestingLabel+"=true", "--wait=false"))
 		FailOnErr(Run("", "kubectl", "delete", "clusterroles", "-l", TestingLabel+"=true", "--wait=false"))
 	*/
-
-	t.Setenv("REDIS_SERVER", endpoint)
-
-	serverFlags := pflag.NewFlagSet("", pflag.PanicOnError)
-	err = serverFlags.Parse([]string{})
-	CheckError(err)
-	serverConfig := servercommand.NewServerConfig(serverFlags, serverFlags).WithDefaultFlags().WithK8sSettings(namespace.Name, rest.CopyConfig(config))
-
-	err = serverFlags.Set("port", strings.Split(apiServerAddress, ":")[1])
-	CheckError(err)
-
-	_ = serverConfig.CreateServer(ctx)
-
-	appControllerFlags := pflag.NewFlagSet("", pflag.PanicOnError)
-	_ = appcontrollercommand.NewApplicationControllerConfig(appControllerFlags, appControllerFlags).WithDefaultFlags().WithK8sSettings(namespace.Name, config)
-	/*
-		go func() {
-			err = appcontrollerConfig.CreateApplicationController(ctx)
-			CheckError(err)
-		}()*/
 
 	// reset settings
 	updateSettingConfigMap(func(cm *corev1.ConfigMap) error {
@@ -1140,6 +1163,8 @@ func applyManifests(config *rest.Config, unstructureds []*unstructured.Unstructu
 	if err != nil {
 		return err
 	}
+
+	time.Sleep(1 * time.Minute)
 
 	// Create a DiscoveryClient
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
