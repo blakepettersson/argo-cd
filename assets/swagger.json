@@ -3171,7 +3171,7 @@
         "parameters": [
           {
             "type": "string",
-            "description": "URL is the URL that this credentials matches to",
+            "description": "URL is the URL that these credentials matches to",
             "name": "creds.url",
             "in": "path",
             "required": true
@@ -8036,6 +8036,10 @@
           "type": "string",
           "title": "Password for authenticating at the repo server"
         },
+        "project": {
+          "type": "string",
+          "title": "Reference that allows repo creds to be automatically scoped per project, if added"
+        },
         "proxy": {
           "type": "string",
           "title": "Proxy specifies the HTTP/HTTPS proxy used to access repos at the repo server"
@@ -8058,7 +8062,7 @@
         },
         "url": {
           "type": "string",
-          "title": "URL is the URL that this credentials matches to"
+          "title": "URL is the URL that these credentials matches to"
         },
         "username": {
           "type": "string",
@@ -8144,7 +8148,7 @@
         },
         "project": {
           "type": "string",
-          "title": "Reference between project and repository that allow you automatically to be added as item inside SourceRepos project entity"
+          "title": "Reference between project and repository that allows it to be automatically added as an item inside SourceRepos project entity"
         },
         "proxy": {
           "type": "string",

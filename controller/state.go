@@ -188,7 +188,7 @@ func (m *appStateManager) GetRepoObjs(app *v1alpha1.Application, sources []v1alp
 			revisions[i] = source.TargetRevision
 		}
 		ts.AddCheckpoint("helm_ms")
-		repo, err := m.db.GetRepository(context.Background(), source.RepoURL)
+		repo, err := m.db.GetRepository(context.Background(), source.RepoURL, proj.Name)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get repo %q: %w", source.RepoURL, err)
 		}

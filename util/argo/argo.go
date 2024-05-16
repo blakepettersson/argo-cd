@@ -388,7 +388,7 @@ func validateRepo(ctx context.Context,
 	errMessage := ""
 
 	for _, source := range sources {
-		repo, err := db.GetRepository(ctx, source.RepoURL)
+		repo, err := db.GetRepository(ctx, source.RepoURL, proj.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -467,7 +467,7 @@ func GetRefSources(ctx context.Context, spec argoappv1.ApplicationSpec, db db.Ar
 		// Get Repositories for all sources before generating Manifests
 		for _, source := range spec.Sources {
 			if source.Ref != "" {
-				repo, err := db.GetRepository(ctx, source.RepoURL)
+				repo, err := db.GetRepository(ctx, source.RepoURL, spec.Project)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get repository %s: %v", source.RepoURL, err)
 				}
@@ -742,7 +742,7 @@ func verifyGenerateManifests(
 	}
 
 	for _, source := range sources {
-		repoRes, err := db.GetRepository(ctx, source.RepoURL)
+		repoRes, err := db.GetRepository(ctx, source.RepoURL, proj.Name)
 		if err != nil {
 			conditions = append(conditions, argoappv1.ApplicationCondition{
 				Type:    argoappv1.ApplicationConditionInvalidSpecError,

@@ -81,8 +81,8 @@ func (s *secretsRepositoryBackend) GetRepoCredsBySecretName(_ context.Context, n
 	return s.secretToRepoCred(secret)
 }
 
-func (s *secretsRepositoryBackend) GetRepository(ctx context.Context, repoURL string) (*appsv1.Repository, error) {
-	secret, err := s.getRepositorySecret(repoURL)
+func (s *secretsRepositoryBackend) GetRepository(ctx context.Context, repoURL, project string) (*appsv1.Repository, error) {
+	secret, err := s.getRepositorySecret(repoURL, project)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return &appsv1.Repository{Repo: repoURL}, nil
@@ -133,7 +133,7 @@ func (s *secretsRepositoryBackend) ListRepositories(ctx context.Context, repoTyp
 }
 
 func (s *secretsRepositoryBackend) UpdateRepository(ctx context.Context, repository *appsv1.Repository) (*appsv1.Repository, error) {
-	repositorySecret, err := s.getRepositorySecret(repository.Repo)
+	repositorySecret, err := s.getRepositorySecret(repository.Repo, repository.Project)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return s.CreateRepository(ctx, repository)
@@ -151,8 +151,8 @@ func (s *secretsRepositoryBackend) UpdateRepository(ctx context.Context, reposit
 	return repository, s.db.settingsMgr.ResyncInformers()
 }
 
-func (s *secretsRepositoryBackend) DeleteRepository(ctx context.Context, repoURL string) error {
-	secret, err := s.getRepositorySecret(repoURL)
+func (s *secretsRepositoryBackend) DeleteRepository(ctx context.Context, repoURL, project string) error {
+	secret, err := s.getRepositorySecret(repoURL, project)
 	if err != nil {
 		return err
 	}
@@ -164,8 +164,8 @@ func (s *secretsRepositoryBackend) DeleteRepository(ctx context.Context, repoURL
 	return s.db.settingsMgr.ResyncInformers()
 }
 
-func (s *secretsRepositoryBackend) RepositoryExists(ctx context.Context, repoURL string) (bool, error) {
-	secret, err := s.getRepositorySecret(repoURL)
+func (s *secretsRepositoryBackend) RepositoryExists(ctx context.Context, repoURL, project string) (bool, error) {
+	secret, err := s.getRepositorySecret(repoURL, project)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return false, nil
@@ -199,8 +199,8 @@ func (s *secretsRepositoryBackend) CreateRepoCreds(ctx context.Context, repoCred
 	return repoCreds, s.db.settingsMgr.ResyncInformers()
 }
 
-func (s *secretsRepositoryBackend) GetRepoCreds(ctx context.Context, repoURL string) (*appsv1.RepoCreds, error) {
-	secret, err := s.getRepoCredsSecret(repoURL)
+func (s *secretsRepositoryBackend) GetRepoCreds(ctx context.Context, repoURL, project string) (*appsv1.RepoCreds, error) {
+	secret, err := s.getRepoCredsSecret(repoURL, project)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return nil, nil
@@ -228,7 +228,7 @@ func (s *secretsRepositoryBackend) ListRepoCreds(ctx context.Context) ([]string,
 }
 
 func (s *secretsRepositoryBackend) UpdateRepoCreds(ctx context.Context, repoCreds *appsv1.RepoCreds) (*appsv1.RepoCreds, error) {
-	repoCredsSecret, err := s.getRepoCredsSecret(repoCreds.URL)
+	repoCredsSecret, err := s.getRepoCredsSecret(repoCreds.URL, repoCreds.Project)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return s.CreateRepoCreds(ctx, repoCreds)
@@ -251,8 +251,8 @@ func (s *secretsRepositoryBackend) UpdateRepoCreds(ctx context.Context, repoCred
 	return updatedRepoCreds, s.db.settingsMgr.ResyncInformers()
 }
 
-func (s *secretsRepositoryBackend) DeleteRepoCreds(ctx context.Context, name string) error {
-	secret, err := s.getRepoCredsSecret(name)
+func (s *secretsRepositoryBackend) DeleteRepoCreds(ctx context.Context, name, project string) error {
+	secret, err := s.getRepoCredsSecret(name, project)
 	if err != nil {
 		return err
 	}
@@ -264,8 +264,8 @@ func (s *secretsRepositoryBackend) DeleteRepoCreds(ctx context.Context, name str
 	return s.db.settingsMgr.ResyncInformers()
 }
 
-func (s *secretsRepositoryBackend) RepoCredsExists(ctx context.Context, repoURL string) (bool, error) {
-	_, err := s.getRepoCredsSecret(repoURL)
+func (s *secretsRepositoryBackend) RepoCredsExists(ctx context.Context, repoURL, project string) (bool, error) {
+	_, err := s.getRepoCredsSecret(repoURL, project)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return false, nil
@@ -454,49 +454,60 @@ func repoCredsToSecret(repoCreds *appsv1.RepoCreds, secret *corev1.Secret) {
 	addSecretMetadata(secret, common.LabelValueSecretTypeRepoCreds)
 }
 
-func (s *secretsRepositoryBackend) getRepositorySecret(repoURL string) (*corev1.Secret, error) {
+func (s *secretsRepositoryBackend) getRepositorySecret(repoURL, project string) (*corev1.Secret, error) {
 	secrets, err := s.db.listSecretsByType(common.LabelValueSecretTypeRepository)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list repository secrets: %w", err)
 	}
 
+	var foundSecret *corev1.Secret
 	for _, secret := range secrets {
 		if git.SameURL(string(secret.Data["url"]), repoURL) {
-			return secret, nil
+			if project != "" && project == string(secret.Data["project"]) {
+				return secret, nil
+			}
+
+			if foundSecret != nil {
+				log.Warnf("Found multiple credentials for repoURL: %s", repoURL)
+			}
+
+			foundSecret = secret
 		}
+	}
+
+	if foundSecret != nil {
+		return foundSecret, nil
 	}
 
 	return nil, status.Errorf(codes.NotFound, "repository %q not found", repoURL)
 }
 
-func (s *secretsRepositoryBackend) getRepoCredsSecret(repoURL string) (*corev1.Secret, error) {
+func (s *secretsRepositoryBackend) getRepoCredsSecret(repoURL, project string) (*corev1.Secret, error) {
 	secrets, err := s.db.listSecretsByType(common.LabelValueSecretTypeRepoCreds)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list repository credential secrets: %w", err)
 	}
 
-	index := s.getRepositoryCredentialIndex(secrets, repoURL)
-	if index < 0 {
-		return nil, status.Errorf(codes.NotFound, "repository credentials %q not found", repoURL)
-	}
-
-	return secrets[index], nil
-}
-
-func (s *secretsRepositoryBackend) getRepositoryCredentialIndex(repoCredentials []*corev1.Secret, repoURL string) int {
-	var max, idx = 0, -1
+	var foundSecret *corev1.Secret
 	repoURL = git.NormalizeGitURL(repoURL)
-	for i, cred := range repoCredentials {
+	for _, cred := range secrets {
 		credUrl := git.NormalizeGitURL(string(cred.Data["url"]))
 		if strings.HasPrefix(repoURL, credUrl) {
-			if len(credUrl) == max {
+			if project != "" && project == string(cred.Data["project"]) {
+				return cred, nil
+			}
+
+			if foundSecret != nil {
 				log.Warnf("Found multiple credentials for repoURL: %s", repoURL)
 			}
-			if len(credUrl) > max {
-				max = len(credUrl)
-				idx = i
-			}
+
+			foundSecret = cred
 		}
 	}
-	return idx
+
+	if foundSecret != nil {
+		return foundSecret, nil
+	}
+
+	return nil, status.Errorf(codes.NotFound, "repository credentials %q not found", repoURL)
 }

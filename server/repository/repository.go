@@ -70,7 +70,7 @@ var (
 )
 
 func (s *Server) getRepo(ctx context.Context, url string) (*appsv1.Repository, error) {
-	repo, err := s.db.GetRepository(ctx, url)
+	repo, err := s.db.GetRepository(ctx, url, "")
 	if err != nil {
 		return nil, errPermissionDenied
 	}
@@ -99,7 +99,7 @@ func (s *Server) getConnectionState(ctx context.Context, url string, forceRefres
 		ModifiedAt: &now,
 	}
 	var err error
-	repo, err := s.db.GetRepository(ctx, url)
+	repo, err := s.db.GetRepository(ctx, url, "")
 	if err == nil {
 		err = s.testRepo(ctx, repo)
 	}
@@ -137,7 +137,7 @@ func (s *Server) Get(ctx context.Context, q *repositorypkg.RepoQuery) (*appsv1.R
 	}
 
 	// getRepo does not return an error for unconfigured repositories, so we are checking here
-	exists, err := s.db.RepositoryExists(ctx, q.Repo)
+	exists, err := s.db.RepositoryExists(ctx, q.Repo, "")
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +393,7 @@ func (s *Server) CreateRepository(ctx context.Context, q *repositorypkg.RepoCrea
 	if q.Repo.Project == "" {
 		repo := q.Repo.DeepCopy()
 		if !repo.HasCredentials() {
-			creds, err := s.db.GetRepositoryCredentials(ctx, repo.Repo)
+			creds, err := s.db.GetRepositoryCredentials(ctx, repo.Repo, "")
 			if err != nil {
 				return nil, err
 			}
@@ -411,7 +411,7 @@ func (s *Server) CreateRepository(ctx context.Context, q *repositorypkg.RepoCrea
 	repo, err = s.db.CreateRepository(ctx, r)
 	if status.Convert(err).Code() == codes.AlreadyExists {
 		// act idempotent if existing spec matches new spec
-		existing, getErr := s.db.GetRepository(ctx, r.Repo)
+		existing, getErr := s.db.GetRepository(ctx, r.Repo, q.Repo.Project)
 		if getErr != nil {
 			return nil, status.Errorf(codes.Internal, "unable to check existing repository details: %v", getErr)
 		}
@@ -485,7 +485,7 @@ func (s *Server) DeleteRepository(ctx context.Context, q *repositorypkg.RepoQuer
 		log.Errorf("error invalidating cache: %v", err)
 	}
 
-	err = s.db.DeleteRepository(ctx, q.Repo)
+	err = s.db.DeleteRepository(ctx, q.Repo, "")
 	return &repositorypkg.RepoResponse{}, err
 }
 
@@ -518,7 +518,7 @@ func (s *Server) ValidateAccess(ctx context.Context, q *repositorypkg.RepoAccess
 	// If repo does not have credentials, check if there are credentials stored
 	// for it and if yes, copy them
 	if !repo.HasCredentials() {
-		repoCreds, err := s.db.GetRepositoryCredentials(ctx, q.Repo)
+		repoCreds, err := s.db.GetRepositoryCredentials(ctx, q.Repo, q.Project)
 		if err != nil {
 			return nil, err
 		}

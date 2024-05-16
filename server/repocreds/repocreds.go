@@ -50,7 +50,7 @@ func (s *Server) ListRepositoryCredentials(ctx context.Context, q *repocredspkg.
 	items := make([]appsv1.RepoCreds, 0)
 	for _, url := range urls {
 		if s.enf.Enforce(ctx.Value("claims"), rbacpolicy.ResourceRepositories, rbacpolicy.ActionGet, url) {
-			repo, err := s.db.GetRepositoryCredentials(ctx, url)
+			repo, err := s.db.GetRepositoryCredentials(ctx, url, "")
 			if err != nil {
 				return nil, err
 			}
@@ -83,7 +83,7 @@ func (s *Server) CreateRepositoryCredentials(ctx context.Context, q *repocredspk
 	_, err := s.db.CreateRepositoryCredentials(ctx, r)
 	if status.Convert(err).Code() == codes.AlreadyExists {
 		// act idempotent if existing spec matches new spec
-		existing, getErr := s.db.GetRepositoryCredentials(ctx, r.URL)
+		existing, getErr := s.db.GetRepositoryCredentials(ctx, r.URL, r.Project)
 		if getErr != nil {
 			return nil, status.Errorf(codes.Internal, "unable to check existing repository credentials details: %v", getErr)
 		}
@@ -117,6 +117,6 @@ func (s *Server) DeleteRepositoryCredentials(ctx context.Context, q *repocredspk
 		return nil, err
 	}
 
-	err := s.db.DeleteRepositoryCredentials(ctx, q.Url)
+	err := s.db.DeleteRepositoryCredentials(ctx, q.Url, "")
 	return &repocredspkg.RepoCredsResponse{}, err
 }

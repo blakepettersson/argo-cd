@@ -5421,7 +5421,7 @@ func schema_pkg_apis_application_v1alpha1_RepoCreds(ref common.ReferenceCallback
 				Properties: map[string]spec.Schema{
 					"url": {
 						SchemaProps: spec.SchemaProps{
-							Description: "URL is the URL that this credentials matches to",
+							Description: "URL is the URL that these credentials matches to",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
@@ -5522,6 +5522,13 @@ func schema_pkg_apis_application_v1alpha1_RepoCreds(ref common.ReferenceCallback
 						SchemaProps: spec.SchemaProps{
 							Description: "ForceHttpBasicAuth specifies whether Argo CD should attempt to force basic auth for HTTP connections",
 							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"project": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reference that allows repo creds to be automatically scoped per project, if added",
+							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
@@ -5710,7 +5717,7 @@ func schema_pkg_apis_application_v1alpha1_Repository(ref common.ReferenceCallbac
 					},
 					"project": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Reference between project and repository that allow you automatically to be added as item inside SourceRepos project entity",
+							Description: "Reference between project and repository that allows it to be automatically added as an item inside SourceRepos project entity",
 							Type:        []string{"string"},
 							Format:      "",
 						},
