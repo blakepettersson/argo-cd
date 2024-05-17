@@ -425,7 +425,7 @@ func (l *legacyRepositoryBackend) credentialsToRepositoryCredentials(repoInfo se
 func (l *legacyRepositoryBackend) setSecretData(prefix string, url string, secretsData map[string]map[string][]byte, secretKey *apiv1.SecretKeySelector, value string, defaultKeyName string) *apiv1.SecretKeySelector {
 	if secretKey == nil && value != "" {
 		secretKey = &apiv1.SecretKeySelector{
-			LocalObjectReference: apiv1.LocalObjectReference{Name: RepoURLToSecretName(prefix, url)},
+			LocalObjectReference: apiv1.LocalObjectReference{Name: RepoURLToSecretName(prefix, url, "")},
 			Key:                  defaultKeyName,
 		}
 	}
