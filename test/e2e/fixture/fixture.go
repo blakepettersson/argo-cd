@@ -7,7 +7,11 @@ import (
 	goerrors "errors"
 	"fmt"
 	appcontrollercommand "github.com/argoproj/argo-cd/v2/cmd/argocd-application-controller/commands"
+	reposervercommand "github.com/argoproj/argo-cd/v2/cmd/argocd-repo-server/commands"
 	servercommand "github.com/argoproj/argo-cd/v2/cmd/argocd-server/commands"
+	cmdutil "github.com/argoproj/argo-cd/v2/cmd/util"
+	"github.com/argoproj/argo-cd/v2/server"
+	"github.com/argoproj/argo-cd/v2/util/cli"
 	grpcutil "github.com/argoproj/argo-cd/v2/util/grpc"
 	"github.com/spf13/pflag"
 	"github.com/testcontainers/testcontainers-go"
@@ -85,6 +89,7 @@ const (
 	EnvArgoCDRedisName         = "ARGOCD_E2E_REDIS_NAME"
 	EnvArgoCDRepoServerName    = "ARGOCD_E2E_REPO_SERVER_NAME"
 	EnvArgoCDAppControllerName = "ARGOCD_E2E_APPLICATION_CONTROLLER_NAME"
+	EnvArgoCDUseTestContainers = "ARGOCD_E2E_USE_TESTCONTAINERS"
 )
 
 var (
@@ -107,6 +112,9 @@ var (
 	argoCDRedisName         string
 	argoCDRepoServerName    string
 	argoCDAppControllerName string
+	k3sContainer            *k3s.K3sContainer
+	argoCDServer            *server.ArgoCDServer
+	e2eCluster              testcontainers.Container
 )
 
 type RepoURLType string
@@ -194,6 +202,67 @@ func init() {
 	argoCDRepoServerName = GetEnvWithDefault(EnvArgoCDRepoServerName, common.DefaultRepoServerName)
 	argoCDAppControllerName = GetEnvWithDefault(EnvArgoCDAppControllerName, common.DefaultApplicationControllerName)
 
+	if env.ParseBoolFromEnv(EnvArgoCDUseTestContainers, true) {
+		//setupGPG()
+		temp, err := os.MkdirTemp("", "repo-server")
+		CheckError(os.MkdirAll(temp+"/gpg/keys", 0700))
+		CheckError(os.MkdirAll(temp+"/gpg/source", 0700))
+		CheckError(os.MkdirAll(temp+"/gpg/plugin", 0700))
+
+		/*
+			if test -d /tmp/argo-e2e/app/config/gpg; then rm -rf /tmp/argo-e2e/app/config/gpg/*; fi
+				mkdir -p /tmp/argo-e2e/app/config/gpg/keys && chmod 0700 /tmp/argo-e2e/app/config/gpg/keys
+				mkdir -p /tmp/argo-e2e/app/config/gpg/source && chmod 0700 /tmp/argo-e2e/app/config/gpg/source
+				mkdir -p /tmp/argo-e2e/app/config/plugin && chmod 0700 /tmp/argo-e2e/app/config/plugin
+				# set paths for locally managed ssh known hosts and tls certs data
+				ARGOCD_SSH_DATA_PATH=/tmp/argo-e2e/app/config/ssh \
+				ARGOCD_TLS_DATA_PATH=/tmp/argo-e2e/app/config/tls \
+				ARGOCD_GPG_DATA_PATH=/tmp/argo-e2e/app/config/gpg/source \
+				ARGOCD_GNUPGHOME=/tmp/argo-e2e/app/config/gpg/keys \
+		*/
+
+		CheckError(err)
+
+		currentWorkingDirectory, err := os.Getwd()
+		CheckError(err)
+
+		os.Setenv("ARGOCD_GNUPGHOME", temp)
+
+		os.Setenv("ARGOCD_GPG_DATA_PATH", temp+"/gpg/source")
+		os.Setenv("ARGOCD_GPG_WRAPPER_PATH", currentWorkingDirectory+"/../../hack/")
+
+		initTestContainers()
+	} else {
+		// set-up variables
+		config := getKubeConfig("", clientcmd.ConfigOverrides{})
+		AppClientset = appclientset.NewForConfigOrDie(config)
+		KubeClientset = kubernetes.NewForConfigOrDie(config)
+		DynamicClientset = dynamic.NewForConfigOrDie(config)
+		KubeConfig = config
+	}
+
+	dialTime := 30 * time.Second
+	tlsTestResult, err := grpcutil.TestTLS(apiServerAddress, dialTime)
+	CheckError(err)
+
+	ArgoCDClientset, err = apiclient.NewClient(&apiclient.ClientOptions{
+		Insecure:          true,
+		ServerAddr:        apiServerAddress,
+		PlainText:         !tlsTestResult.TLS,
+		ServerName:        argoCDServerName,
+		RedisHaProxyName:  argoCDRedisHAProxyName,
+		RedisName:         argoCDRedisName,
+		RepoServerName:    argoCDRepoServerName,
+		AppControllerName: argoCDAppControllerName,
+	})
+	CheckError(err)
+
+	plainText = !tlsTestResult.TLS
+
+	LoginAs(adminUsername)
+
+	log.WithFields(log.Fields{"apiServerAddress": apiServerAddress}).Info("initialized")
+
 	// Preload a list of tests that should be skipped
 	testsRun = make(map[string]bool)
 	rf := os.Getenv("ARGOCD_E2E_RECORD")
@@ -218,7 +287,6 @@ func init() {
 	for scanner.Scan() {
 		testsRun[scanner.Text()] = true
 	}
-
 }
 
 func loginAs(username, password string) {
@@ -551,21 +619,13 @@ func WithTestData(testdata string) TestOption {
 	}
 }
 
-func EnsureCleanState(t *testing.T, opts ...TestOption) {
-	opt := newTestOption(opts...)
-	// In large scenarios, we can skip tests that already run
-	SkipIfAlreadyRun(t)
-	// Register this test after it has been run & was successful
-	t.Cleanup(func() {
-		RecordTestRun(t)
-	})
-
-	start := time.Now()
-
+func initTestContainers() {
 	ctx := context.Background()
-	k3sContainer, err := k3s.RunContainer(ctx,
+	c, err := k3s.RunContainer(ctx,
 		testcontainers.WithImage("rancher/k3s:v1.27.1-k3s1")) // TODO: env var k3s version
 	CheckError(err)
+
+	k3sContainer = c
 
 	kubeConfigYaml, err := k3sContainer.GetKubeConfig(ctx)
 	CheckError(err)
@@ -582,7 +642,7 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 	// Define the namespace details
 	namespace := &corev1.Namespace{
 		ObjectMeta: v1.ObjectMeta{
-			Name: "argocd",
+			Name: TestNamespace(),
 		},
 	}
 
@@ -595,7 +655,7 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 	unstructureds, err := decodeYAMLToUnstructured(manifests)
 	CheckError(err)
 
-	CheckError(applyManifests(config, unstructureds))
+	CheckError(applyManifests(config, unstructureds, namespace.Name))
 
 	redisContainer, err := redis.RunContainer(ctx, testcontainers.WithImage("redis:6"))
 	CheckError(err)
@@ -603,20 +663,24 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 	endpoint, err := redisContainer.Endpoint(ctx, "")
 	CheckError(err)
 
-	t.Setenv("REDIS_SERVER", endpoint)
+	cli.SetLogFormat(cmdutil.LogFormat)
+	cli.SetLogLevel(cmdutil.LogLevel)
+	cli.SetGLogLevel(0)
+
+	repoServerFlags := pflag.NewFlagSet("", pflag.PanicOnError)
+	CheckError(repoServerFlags.Parse([]string{}))
+
+	go func() {
+		errors.CheckError(reposervercommand.NewRepoServerConfig(repoServerFlags).WithDefaultFlags().CreateRepoServer(ctx))
+	}()
 
 	serverFlags := pflag.NewFlagSet("", pflag.PanicOnError)
-	err = serverFlags.Parse([]string{})
-	CheckError(err)
+	CheckError(serverFlags.Parse([]string{}))
 	serverConfig := servercommand.NewServerConfig(serverFlags, serverFlags).WithDefaultFlags().WithK8sSettings(namespace.Name, rest.CopyConfig(config))
+	CheckError(serverFlags.Set("redis", endpoint))
+	CheckError(serverFlags.Set("port", strings.Split(apiServerAddress, ":")[1]))
 
-	err = serverFlags.Set("port", strings.Split(apiServerAddress, ":")[1])
-	CheckError(err)
-
-	_ = serverConfig.CreateServer(ctx)
-
-	appControllerFlags := pflag.NewFlagSet("", pflag.PanicOnError)
-	_ = appcontrollercommand.NewApplicationControllerConfig(appControllerFlags, appControllerFlags).WithDefaultFlags().WithK8sSettings(namespace.Name, config)
+	argoCDServer = serverConfig.CreateServer(ctx)
 
 	req := testcontainers.ContainerRequest{
 		Image:        "argocd-e2e-cluster:latest",
@@ -624,55 +688,65 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 		Cmd:          []string{"goreman", "start"},
 	}
 
-	_, err = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	e2eCluster, err = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
 	})
 	CheckError(err)
 
-	FailOnErr(Run("", "mkdir", "-p", TmpDir+"/app/config"))
-
-	kubeConfigPath := TmpDir + "/app/config/kubeconfig"
+	temp, err := os.MkdirTemp("", "kubeconfig")
+	CheckError(err)
+	kubeConfigPath := temp + "/kubeconfig.yaml"
 	CheckError(err)
 
 	err = os.WriteFile(kubeConfigPath, kubeConfigYaml, 0666)
 	CheckError(err)
 
+	appControllerFlags := pflag.NewFlagSet("", pflag.PanicOnError)
+	CheckError(appControllerFlags.Parse([]string{}))
+	appControllerConfig := appcontrollercommand.NewApplicationControllerConfig(appControllerFlags, appControllerFlags).WithDefaultFlags().WithK8sSettings(namespace.Name, rest.CopyConfig(config))
+	CheckError(appControllerFlags.Set("redis", endpoint))
+	CheckError(appControllerFlags.Set("repo-server", "localhost:8081"))
+	CheckError(appControllerConfig.CreateApplicationController(ctx))
+
 	os.Setenv("KUBECONFIG", kubeConfigPath)
+}
 
-	/*
-		go func() {
-			err = appcontrollerConfig.CreateApplicationController(ctx)
-			CheckError(err)
-		}()*/
+func EnsureCleanState(t *testing.T, opts ...TestOption) {
+	opt := newTestOption(opts...)
+	// In large scenarios, we can skip tests that already run
+	SkipIfAlreadyRun(t)
+	// Register this test after it has been run & was successful
+	t.Cleanup(func() {
+		RecordTestRun(t)
+	})
 
+	start := time.Now()
+
+	policy := v1.DeletePropagationBackground
 	// delete resources
 	// kubectl delete apps --all
+	CheckError(AppClientset.ArgoprojV1alpha1().Applications(TestNamespace()).DeleteCollection(context.Background(), v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{}))
+	CheckError(AppClientset.ArgoprojV1alpha1().Applications(AppNamespace()).DeleteCollection(context.Background(), v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{}))
+	// kubectl delete appprojects --field-selector metadata.name!=default
+	CheckError(AppClientset.ArgoprojV1alpha1().AppProjects(TestNamespace()).DeleteCollection(context.Background(),
+		v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{FieldSelector: "metadata.name!=default"}))
+	// kubectl delete secrets -l argocd.argoproj.io/secret-type=repo-config
+	CheckError(KubeClientset.CoreV1().Secrets(TestNamespace()).DeleteCollection(context.Background(),
+		v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{LabelSelector: common.LabelKeySecretType + "=" + common.LabelValueSecretTypeRepository}))
+	// kubectl delete secrets -l argocd.argoproj.io/secret-type=repo-creds
+	CheckError(KubeClientset.CoreV1().Secrets(TestNamespace()).DeleteCollection(context.Background(),
+		v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{LabelSelector: common.LabelKeySecretType + "=" + common.LabelValueSecretTypeRepoCreds}))
+	// kubectl delete secrets -l argocd.argoproj.io/secret-type=cluster
+	CheckError(KubeClientset.CoreV1().Secrets(TestNamespace()).DeleteCollection(context.Background(),
+		v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{LabelSelector: common.LabelKeySecretType + "=" + common.LabelValueSecretTypeCluster}))
+	// kubectl delete secrets -l e2e.argoproj.io=true
+	CheckError(KubeClientset.CoreV1().Secrets(TestNamespace()).DeleteCollection(context.Background(),
+		v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{LabelSelector: TestingLabel + "=true"}))
 
-	/*
-		policy := v1.DeletePropagationBackground
-		CheckError(AppClientset.ArgoprojV1alpha1().Applications(TestNamespace()).DeleteCollection(context.Background(), v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{}))
-		CheckError(AppClientset.ArgoprojV1alpha1().Applications(AppNamespace()).DeleteCollection(context.Background(), v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{}))
-		// kubectl delete appprojects --field-selector metadata.name!=default
-		CheckError(AppClientset.ArgoprojV1alpha1().AppProjects(TestNamespace()).DeleteCollection(context.Background(),
-			v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{FieldSelector: "metadata.name!=default"}))
-		// kubectl delete secrets -l argocd.argoproj.io/secret-type=repo-config
-		CheckError(KubeClientset.CoreV1().Secrets(TestNamespace()).DeleteCollection(context.Background(),
-			v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{LabelSelector: common.LabelKeySecretType + "=" + common.LabelValueSecretTypeRepository}))
-		// kubectl delete secrets -l argocd.argoproj.io/secret-type=repo-creds
-		CheckError(KubeClientset.CoreV1().Secrets(TestNamespace()).DeleteCollection(context.Background(),
-			v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{LabelSelector: common.LabelKeySecretType + "=" + common.LabelValueSecretTypeRepoCreds}))
-		// kubectl delete secrets -l argocd.argoproj.io/secret-type=cluster
-		CheckError(KubeClientset.CoreV1().Secrets(TestNamespace()).DeleteCollection(context.Background(),
-			v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{LabelSelector: common.LabelKeySecretType + "=" + common.LabelValueSecretTypeCluster}))
-		// kubectl delete secrets -l e2e.argoproj.io=true
-		CheckError(KubeClientset.CoreV1().Secrets(TestNamespace()).DeleteCollection(context.Background(),
-			v1.DeleteOptions{PropagationPolicy: &policy}, v1.ListOptions{LabelSelector: TestingLabel + "=true"}))
-
-		FailOnErr(Run("", "kubectl", "delete", "ns", "-l", TestingLabel+"=true", "--field-selector", "status.phase=Active", "--wait=false"))
-		FailOnErr(Run("", "kubectl", "delete", "crd", "-l", TestingLabel+"=true", "--wait=false"))
-		FailOnErr(Run("", "kubectl", "delete", "clusterroles", "-l", TestingLabel+"=true", "--wait=false"))
-	*/
+	FailOnErr(Run("", "kubectl", "delete", "ns", "-l", TestingLabel+"=true", "--field-selector", "status.phase=Active", "--wait=false"))
+	FailOnErr(Run("", "kubectl", "delete", "crd", "-l", TestingLabel+"=true", "--wait=false"))
+	FailOnErr(Run("", "kubectl", "delete", "clusterroles", "-l", TestingLabel+"=true", "--wait=false"))
 
 	// reset settings
 	updateSettingConfigMap(func(cm *corev1.ConfigMap) error {
@@ -691,32 +765,14 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 		return nil
 	})
 
+	// We can switch user and as result in previous state we will have non-admin user, this case should be reset
+	LoginAs(adminUsername)
+
 	// reset gpg-keys config map
 	updateGenericConfigMap(common.ArgoCDGPGKeysConfigMapName, func(cm *corev1.ConfigMap) error {
 		cm.Data = map[string]string{}
 		return nil
 	})
-
-	dialTime := 30 * time.Second
-	tlsTestResult, err := grpcutil.TestTLS(apiServerAddress, dialTime)
-	CheckError(err)
-
-	plainText = !tlsTestResult.TLS
-
-	ArgoCDClientset, err = apiclient.NewClient(&apiclient.ClientOptions{
-		Insecure:          true,
-		ServerAddr:        apiServerAddress,
-		PlainText:         !tlsTestResult.TLS,
-		ServerName:        argoCDServerName,
-		RedisHaProxyName:  argoCDRedisHAProxyName,
-		RedisName:         argoCDRedisName,
-		RepoServerName:    argoCDRepoServerName,
-		AppControllerName: argoCDAppControllerName,
-	})
-	CheckError(err)
-
-	// We can switch user and as result in previous state we will have non-admin user, this case should be reset
-	LoginAs(adminUsername)
 
 	SetProjectSpec("default", v1alpha1.AppProjectSpec{
 		OrphanedResources:        nil,
@@ -756,23 +812,7 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 	}
 
 	// For signing during the tests
-	FailOnErr(Run("", "mkdir", "-p", TmpDir+"/gpg"))
-	FailOnErr(Run("", "chmod", "0700", TmpDir+"/gpg"))
-	prevGnuPGHome := os.Getenv("GNUPGHOME")
-	os.Setenv("GNUPGHOME", TmpDir+"/gpg")
-	// nolint:errcheck
-	Run("", "pkill", "-9", "gpg-agent")
-	FailOnErr(Run("", "gpg", "--import", "../fixture/gpg/signingkey.asc"))
-	os.Setenv("GNUPGHOME", prevGnuPGHome)
-
-	// recreate GPG directories
-	if IsLocal() {
-		FailOnErr(Run("", "mkdir", "-p", TmpDir+"/app/config/gpg/source"))
-		FailOnErr(Run("", "mkdir", "-p", TmpDir+"/app/config/gpg/keys"))
-		FailOnErr(Run("", "chmod", "0700", TmpDir+"/app/config/gpg/keys"))
-		FailOnErr(Run("", "mkdir", "-p", TmpDir+PluginSockFilePath))
-		FailOnErr(Run("", "chmod", "0700", TmpDir+PluginSockFilePath))
-	}
+	setupGPG()
 
 	// set-up tmp repo, must have unique name
 	FailOnErr(Run("", "cp", "-Rf", opt.testdata, repoDirectory()))
@@ -822,6 +862,26 @@ func EnsureCleanState(t *testing.T, opts ...TestOption) {
 	log.WithFields(log.Fields{"apiServerAddress": apiServerAddress}).Info("initialized")
 
 	log.WithFields(log.Fields{"duration": time.Since(start), "name": t.Name(), "id": id, "username": "admin", "password": "password"}).Info("clean state")
+}
+
+func setupGPG() {
+	FailOnErr(Run("", "mkdir", "-p", TmpDir+"/gpg"))
+	FailOnErr(Run("", "chmod", "0700", TmpDir+"/gpg"))
+	prevGnuPGHome := os.Getenv("GNUPGHOME")
+	os.Setenv("GNUPGHOME", TmpDir+"/gpg")
+	// nolint:errcheck
+	Run("", "pkill", "-9", "gpg-agent")
+	FailOnErr(Run("", "gpg", "--import", "../fixture/gpg/signingkey.asc"))
+	os.Setenv("GNUPGHOME", prevGnuPGHome)
+
+	// recreate GPG directories
+	if IsLocal() {
+		FailOnErr(Run("", "mkdir", "-p", TmpDir+"/app/config/gpg/source"))
+		FailOnErr(Run("", "mkdir", "-p", TmpDir+"/app/config/gpg/keys"))
+		FailOnErr(Run("", "chmod", "0700", TmpDir+"/app/config/gpg/keys"))
+		FailOnErr(Run("", "mkdir", "-p", TmpDir+PluginSockFilePath))
+		FailOnErr(Run("", "chmod", "0700", TmpDir+PluginSockFilePath))
+	}
 }
 
 func RunCliWithRetry(maxRetries int, args ...string) (string, error) {
@@ -1158,7 +1218,7 @@ func decodeYAMLToUnstructured(yamlBytes []byte) ([]*unstructured.Unstructured, e
 	return unstructs, nil
 }
 
-func applyManifests(config *rest.Config, unstructureds []*unstructured.Unstructured) error {
+func applyManifests(config *rest.Config, unstructureds []*unstructured.Unstructured, namespace string) error {
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return err
@@ -1191,7 +1251,7 @@ func applyManifests(config *rest.Config, unstructureds []*unstructured.Unstructu
 		for _, res := range resList.APIResources {
 			if res.Kind == gvk.Kind {
 				if res.Namespaced {
-					ns = "argocd"
+					ns = namespace
 				}
 				break
 			}

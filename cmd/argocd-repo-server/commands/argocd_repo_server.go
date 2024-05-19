@@ -40,37 +40,35 @@ const (
 	cliName = "argocd-repo-server"
 )
 
-var (
-	gnuPGSourcePath                              = env.StringFromEnv(common.EnvGPGDataPath, "/app/config/gpg/source")
-	pauseGenerationAfterFailedGenerationAttempts = env.ParseNumFromEnv(common.EnvPauseGenerationAfterFailedAttempts, 3, 0, math.MaxInt32)
-	pauseGenerationOnFailureForMinutes           = env.ParseNumFromEnv(common.EnvPauseGenerationMinutes, 60, 0, math.MaxInt32)
-	pauseGenerationOnFailureForRequests          = env.ParseNumFromEnv(common.EnvPauseGenerationRequests, 0, 0, math.MaxInt32)
-	gitSubmoduleEnabled                          = env.ParseBoolFromEnv(common.EnvGitSubmoduleEnabled, true)
-)
-
 type RepoServerConfig struct {
-	flags                             *flag.FlagSet
-	parallelismLimit                  int64
-	listenPort                        int
-	listenHost                        string
-	metricsPort                       int
-	metricsHost                       string
-	otlpAddress                       string
-	otlpInsecure                      bool
-	otlpHeaders                       map[string]string
-	otlpAttrs                         []string
-	cacheSrc                          func() (*reposervercache.Cache, error)
-	tlsConfigCustomizerSrc            func() (tls.ConfigCustomizer, error)
-	redisClient                       *redis.Client
-	disableTLS                        bool
-	maxCombinedDirectoryManifestsSize string
-	cmpTarExcludedGlobs               []string
-	allowOutOfBoundsSymlinks          bool
-	streamedManifestMaxTarSize        string
-	streamedManifestMaxExtractedSize  string
-	helmManifestMaxExtractedSize      string
-	helmRegistryMaxIndexSize          string
-	disableManifestMaxExtractedSize   bool
+	flags                                        *flag.FlagSet
+	parallelismLimit                             int64
+	listenPort                                   int
+	listenHost                                   string
+	metricsPort                                  int
+	metricsHost                                  string
+	otlpAddress                                  string
+	otlpInsecure                                 bool
+	otlpHeaders                                  map[string]string
+	otlpAttrs                                    []string
+	cacheSrc                                     func() (*reposervercache.Cache, error)
+	tlsConfigCustomizerSrc                       func() (tls.ConfigCustomizer, error)
+	redisClient                                  *redis.Client
+	disableTLS                                   bool
+	maxCombinedDirectoryManifestsSize            string
+	cmpTarExcludedGlobs                          []string
+	allowOutOfBoundsSymlinks                     bool
+	streamedManifestMaxTarSize                   string
+	streamedManifestMaxExtractedSize             string
+	helmManifestMaxExtractedSize                 string
+	helmRegistryMaxIndexSize                     string
+	disableManifestMaxExtractedSize              bool
+	gnuPGSourcePath                              string
+	gnuPGWrapperPath                             string
+	pauseGenerationAfterFailedGenerationAttempts int
+	pauseGenerationOnFailureForMinutes           int
+	pauseGenerationOnFailureForRequests          int
+	gitSubmoduleEnabled                          bool
 }
 
 func NewRepoServerConfig(flags *flag.FlagSet) *RepoServerConfig {
@@ -104,6 +102,13 @@ func (c *RepoServerConfig) WithDefaultFlags() *RepoServerConfig {
 		},
 	})
 	c.tlsConfigCustomizerSrc = tls.AddTLSFlagsToCmd(c.flags)
+
+	c.gnuPGSourcePath = env.StringFromEnv(common.EnvGPGDataPath, "/app/config/gpg/source")
+	c.gnuPGWrapperPath = env.StringFromEnv(common.EnvGPGWrapperPath, "")
+	c.pauseGenerationAfterFailedGenerationAttempts = env.ParseNumFromEnv(common.EnvPauseGenerationAfterFailedAttempts, 3, 0, math.MaxInt32)
+	c.pauseGenerationOnFailureForMinutes = env.ParseNumFromEnv(common.EnvPauseGenerationMinutes, 60, 0, math.MaxInt32)
+	c.pauseGenerationOnFailureForRequests = env.ParseNumFromEnv(common.EnvPauseGenerationRequests, 0, 0, math.MaxInt32)
+	c.gitSubmoduleEnabled = env.ParseBoolFromEnv(common.EnvGitSubmoduleEnabled, true)
 	return c
 }
 
@@ -149,10 +154,10 @@ func (c *RepoServerConfig) CreateRepoServer(ctx context.Context) error {
 	cacheutil.CollectMetrics(c.redisClient, metricsServer)
 	server, err := reposerver.NewServer(metricsServer, cache, tlsConfigCustomizer, repository.RepoServerInitConstants{
 		ParallelismLimit: c.parallelismLimit,
-		PauseGenerationAfterFailedGenerationAttempts: pauseGenerationAfterFailedGenerationAttempts,
-		PauseGenerationOnFailureForMinutes:           pauseGenerationOnFailureForMinutes,
-		PauseGenerationOnFailureForRequests:          pauseGenerationOnFailureForRequests,
-		SubmoduleEnabled:                             gitSubmoduleEnabled,
+		PauseGenerationAfterFailedGenerationAttempts: c.pauseGenerationAfterFailedGenerationAttempts,
+		PauseGenerationOnFailureForMinutes:           c.pauseGenerationOnFailureForMinutes,
+		PauseGenerationOnFailureForRequests:          c.pauseGenerationOnFailureForRequests,
+		SubmoduleEnabled:                             c.gitSubmoduleEnabled,
 		MaxCombinedDirectoryManifestsSize:            maxCombinedDirectoryManifestsQuantity,
 		CMPTarExcludedGlobs:                          c.cmpTarExcludedGlobs,
 		AllowOutOfBoundsSymlinks:                     c.allowOutOfBoundsSymlinks,
@@ -210,12 +215,12 @@ func (c *RepoServerConfig) CreateRepoServer(ctx context.Context) error {
 		err = gpg.InitializeGnuPG()
 		errors.CheckError(err)
 
-		log.Infof("Populating GnuPG keyring with keys from %s", gnuPGSourcePath)
-		added, removed, err := gpg.SyncKeyRingFromDirectory(gnuPGSourcePath)
+		log.Infof("Populating GnuPG keyring with keys from %s", c.gnuPGSourcePath)
+		added, removed, err := gpg.SyncKeyRingFromDirectory(c.gnuPGSourcePath, c.gnuPGWrapperPath)
 		errors.CheckError(err)
 		log.Infof("Loaded %d (and removed %d) keys from keyring", len(added), len(removed))
 
-		go func() { errors.CheckError(reposerver.StartGPGWatcher(gnuPGSourcePath)) }()
+		go func() { errors.CheckError(reposerver.StartGPGWatcher(c.gnuPGSourcePath, c.gnuPGWrapperPath)) }()
 	}
 
 	log.Infof("argocd-repo-server is listening on %s", listener.Addr())

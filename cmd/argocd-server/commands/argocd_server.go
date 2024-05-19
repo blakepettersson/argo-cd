@@ -169,10 +169,6 @@ func (c *ServerConfig) CreateServer(ctx context.Context) *server.ArgoCDServer {
 		},
 	)
 
-	cli.SetLogFormat(cmdutil.LogFormat)
-	cli.SetLogLevel(cmdutil.LogLevel)
-	cli.SetGLogLevel(c.glogLevel)
-
 	tlsConfigCustomizer, err := c.tlsConfigCustomizerSrc()
 	errors.CheckError(err)
 	cache, err := c.cacheSrc()
@@ -296,6 +292,9 @@ func NewCommand() *cobra.Command {
 		Long:              "The API server is a gRPC/REST server which exposes the API consumed by the Web UI, CLI, and CI/CD systems.  This command runs API server in the foreground.  It can be configured by following options.",
 		DisableAutoGenTag: true,
 		Run: func(c *cobra.Command, args []string) {
+			cli.SetLogFormat(cmdutil.LogFormat)
+			cli.SetLogLevel(cmdutil.LogLevel)
+			cli.SetGLogLevel(config.glogLevel)
 			argocd := config.CreateServer(c.Context())
 			argocd.Wait()
 			argocd.Shutdown()

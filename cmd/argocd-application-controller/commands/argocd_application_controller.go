@@ -140,14 +140,7 @@ func (c *ApplicationControllerConfig) WithK8sSettings(namespace string, config *
 	return c
 }
 
-func (c *ApplicationControllerConfig) CreateApplicationController(wrappedCtx context.Context) error {
-	ctx, cancel := context.WithCancel(wrappedCtx)
-	defer cancel()
-
-	cli.SetLogFormat(cmdutil.LogFormat)
-	cli.SetLogLevel(cmdutil.LogLevel)
-	cli.SetGLogLevel(c.glogLevel)
-
+func (c *ApplicationControllerConfig) CreateApplicationController(ctx context.Context) error {
 	var namespace string
 	var config *rest.Config
 	if c.clientConfig != nil {
@@ -271,7 +264,12 @@ func NewCommand() *cobra.Command {
 		Long:              "ArgoCD application controller is a Kubernetes controller that continuously monitors running applications and compares the current, live state against the desired target state (as specified in the repo). This command runs Application Controller in the foreground.  It can be configured by following options.",
 		DisableAutoGenTag: true,
 		RunE: func(c *cobra.Command, args []string) error {
-			err := config.CreateApplicationController(c.Context())
+			ctx, cancel := context.WithCancel(c.Context())
+			defer cancel()
+			cli.SetLogFormat(cmdutil.LogFormat)
+			cli.SetLogLevel(cmdutil.LogLevel)
+			cli.SetGLogLevel(config.glogLevel)
+			err := config.CreateApplicationController(ctx)
 			errors.CheckError(err)
 			// Wait forever
 			select {}
