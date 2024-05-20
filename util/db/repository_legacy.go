@@ -127,7 +127,7 @@ func (l *legacyRepositoryBackend) DeleteRepository(ctx context.Context, repoURL,
 	return l.db.settingsMgr.SaveRepositories(repos)
 }
 
-func (l *legacyRepositoryBackend) RepositoryExists(ctx context.Context, repoURL, project string) (bool, error) {
+func (l *legacyRepositoryBackend) RepositoryExists(ctx context.Context, repoURL, project string, allowFallback bool) (bool, error) {
 	repos, err := l.db.settingsMgr.GetRepositories()
 	if err != nil {
 		return false, fmt.Errorf("unable to get repositories: %w", err)
@@ -225,7 +225,7 @@ func (l *legacyRepositoryBackend) DeleteRepoCreds(ctx context.Context, name, pro
 	return l.db.settingsMgr.SaveRepositoryCredentials(repos)
 }
 
-func (l *legacyRepositoryBackend) RepoCredsExists(ctx context.Context, repoURL, project string) (bool, error) {
+func (l *legacyRepositoryBackend) RepoCredsExists(ctx context.Context, repoURL, project string, allowFallback bool) (bool, error) {
 	creds, err := l.db.settingsMgr.GetRepositoryCredentials()
 	if err != nil {
 		return false, err

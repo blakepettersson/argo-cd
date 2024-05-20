@@ -43,14 +43,14 @@ type repositoryBackend interface {
 	ListRepositories(ctx context.Context, repoType *string) ([]*appsv1.Repository, error)
 	UpdateRepository(ctx context.Context, r *appsv1.Repository) (*appsv1.Repository, error)
 	DeleteRepository(ctx context.Context, repoURL, project string) error
-	RepositoryExists(ctx context.Context, repoURL, project string) (bool, error)
+	RepositoryExists(ctx context.Context, repoURL, project string, allowFallback bool) (bool, error)
 
 	CreateRepoCreds(ctx context.Context, r *appsv1.RepoCreds) (*appsv1.RepoCreds, error)
 	GetRepoCreds(ctx context.Context, repoURL, project string) (*appsv1.RepoCreds, error)
 	ListRepoCreds(ctx context.Context) ([]string, error)
 	UpdateRepoCreds(ctx context.Context, r *appsv1.RepoCreds) (*appsv1.RepoCreds, error)
 	DeleteRepoCreds(ctx context.Context, name, project string) error
-	RepoCredsExists(ctx context.Context, repoURL, project string) (bool, error)
+	RepoCredsExists(ctx context.Context, repoURL, project string, allowFallback bool) (bool, error)
 
 	GetAllHelmRepoCreds(ctx context.Context) ([]*appsv1.RepoCreds, error)
 }
@@ -59,11 +59,11 @@ func (db *db) CreateRepository(ctx context.Context, r *appsv1.Repository) (*apps
 	secretBackend := db.repoBackend()
 	legacyBackend := db.legacyRepoBackend()
 
-	secretExists, err := secretBackend.RepositoryExists(ctx, r.Repo, r.Project)
+	secretExists, err := secretBackend.RepositoryExists(ctx, r.Repo, r.Project, false)
 	if err != nil {
 		return nil, err
 	}
-	legacyExists, err := legacyBackend.RepositoryExists(ctx, r.Repo, r.Project)
+	legacyExists, err := legacyBackend.RepositoryExists(ctx, r.Repo, r.Project, false)
 	if err != nil {
 		return nil, err
 	}
@@ -110,18 +110,18 @@ func (db *db) GetProjectRepositories(ctx context.Context, project string) ([]*ap
 
 func (db *db) RepositoryExists(ctx context.Context, repoURL, project string) (bool, error) {
 	secretsBackend := db.repoBackend()
-	exists, err := secretsBackend.RepositoryExists(ctx, repoURL, project)
+	exists, err := secretsBackend.RepositoryExists(ctx, repoURL, project, true)
 	if exists || err != nil {
 		return exists, err
 	}
 
 	legacyBackend := db.legacyRepoBackend()
-	return legacyBackend.RepositoryExists(ctx, repoURL, project)
+	return legacyBackend.RepositoryExists(ctx, repoURL, project, true)
 }
 
 func (db *db) getRepository(ctx context.Context, repoURL, project string) (*appsv1.Repository, error) {
 	secretsBackend := db.repoBackend()
-	exists, err := secretsBackend.RepositoryExists(ctx, repoURL, project)
+	exists, err := secretsBackend.RepositoryExists(ctx, repoURL, project, true)
 	if err != nil {
 		return nil, fmt.Errorf("unable to check if repository %q exists from secrets backend: %v", repoURL, err)
 	} else if exists {
@@ -133,7 +133,7 @@ func (db *db) getRepository(ctx context.Context, repoURL, project string) (*apps
 	}
 
 	legacyBackend := db.legacyRepoBackend()
-	exists, err = legacyBackend.RepositoryExists(ctx, repoURL, project)
+	exists, err = legacyBackend.RepositoryExists(ctx, repoURL, project, true)
 	if err != nil {
 		return nil, fmt.Errorf("unable to check if repository %q exists from legacy backend: %v", repoURL, err)
 	} else if exists {
@@ -176,7 +176,7 @@ func (db *db) listRepositories(ctx context.Context, repoType *string) ([]*appsv1
 // UpdateRepository updates a repository
 func (db *db) UpdateRepository(ctx context.Context, r *appsv1.Repository) (*appsv1.Repository, error) {
 	secretsBackend := db.repoBackend()
-	exists, err := secretsBackend.RepositoryExists(ctx, r.Repo, r.Project)
+	exists, err := secretsBackend.RepositoryExists(ctx, r.Repo, r.Project, false)
 	if err != nil {
 		return nil, err
 	} else if exists {
@@ -184,7 +184,7 @@ func (db *db) UpdateRepository(ctx context.Context, r *appsv1.Repository) (*apps
 	}
 
 	legacyBackend := db.legacyRepoBackend()
-	exists, err = legacyBackend.RepositoryExists(ctx, r.Repo, r.Project)
+	exists, err = legacyBackend.RepositoryExists(ctx, r.Repo, r.Project, false)
 	if err != nil {
 		return nil, err
 	} else if exists {
@@ -196,7 +196,7 @@ func (db *db) UpdateRepository(ctx context.Context, r *appsv1.Repository) (*apps
 
 func (db *db) DeleteRepository(ctx context.Context, repoURL, project string) error {
 	secretsBackend := db.repoBackend()
-	exists, err := secretsBackend.RepositoryExists(ctx, repoURL, project)
+	exists, err := secretsBackend.RepositoryExists(ctx, repoURL, project, false)
 	if err != nil {
 		return err
 	} else if exists {
@@ -204,7 +204,7 @@ func (db *db) DeleteRepository(ctx context.Context, repoURL, project string) err
 	}
 
 	legacyBackend := db.legacyRepoBackend()
-	exists, err = legacyBackend.RepositoryExists(ctx, repoURL, project)
+	exists, err = legacyBackend.RepositoryExists(ctx, repoURL, project, false)
 	if err != nil {
 		return err
 	} else if exists {
@@ -235,7 +235,7 @@ func (db *db) ListRepositoryCredentials(ctx context.Context) ([]string, error) {
 // GetRepositoryCredentials retrieves a repository credential set
 func (db *db) GetRepositoryCredentials(ctx context.Context, repoURL, project string) (*appsv1.RepoCreds, error) {
 	secretsBackend := db.repoBackend()
-	exists, err := secretsBackend.RepoCredsExists(ctx, repoURL, project)
+	exists, err := secretsBackend.RepoCredsExists(ctx, repoURL, project, true)
 	if err != nil {
 		return nil, fmt.Errorf("unable to check if repository credentials for %q exists from secrets backend: %w", repoURL, err)
 	} else if exists {
@@ -247,7 +247,7 @@ func (db *db) GetRepositoryCredentials(ctx context.Context, repoURL, project str
 	}
 
 	legacyBackend := db.legacyRepoBackend()
-	exists, err = legacyBackend.RepoCredsExists(ctx, repoURL, project)
+	exists, err = legacyBackend.RepoCredsExists(ctx, repoURL, project, true)
 	if err != nil {
 		return nil, fmt.Errorf("unable to check if repository credentials for %q exists from legacy backend: %w", repoURL, err)
 	} else if exists {
@@ -284,11 +284,11 @@ func (db *db) CreateRepositoryCredentials(ctx context.Context, r *appsv1.RepoCre
 	legacyBackend := db.legacyRepoBackend()
 	secretBackend := db.repoBackend()
 
-	secretExists, err := secretBackend.RepositoryExists(ctx, r.URL, r.Project)
+	secretExists, err := secretBackend.RepositoryExists(ctx, r.URL, r.Project, false)
 	if err != nil {
 		return nil, err
 	}
-	legacyExists, err := legacyBackend.RepositoryExists(ctx, r.URL, r.Project)
+	legacyExists, err := legacyBackend.RepositoryExists(ctx, r.URL, r.Project, false)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +303,7 @@ func (db *db) CreateRepositoryCredentials(ctx context.Context, r *appsv1.RepoCre
 // UpdateRepositoryCredentials updates a repository credential set
 func (db *db) UpdateRepositoryCredentials(ctx context.Context, r *appsv1.RepoCreds) (*appsv1.RepoCreds, error) {
 	secretsBackend := db.repoBackend()
-	exists, err := secretsBackend.RepoCredsExists(ctx, r.URL, r.Project)
+	exists, err := secretsBackend.RepoCredsExists(ctx, r.URL, r.Project, false)
 	if err != nil {
 		return nil, err
 	} else if exists {
@@ -311,7 +311,7 @@ func (db *db) UpdateRepositoryCredentials(ctx context.Context, r *appsv1.RepoCre
 	}
 
 	legacyBackend := db.legacyRepoBackend()
-	exists, err = legacyBackend.RepoCredsExists(ctx, r.URL, r.Project)
+	exists, err = legacyBackend.RepoCredsExists(ctx, r.URL, r.Project, false)
 	if err != nil {
 		return nil, err
 	} else if exists {
@@ -325,7 +325,7 @@ func (db *db) UpdateRepositoryCredentials(ctx context.Context, r *appsv1.RepoCre
 // also all the secrets which actually contained the credentials.
 func (db *db) DeleteRepositoryCredentials(ctx context.Context, name, project string) error {
 	secretsBackend := db.repoBackend()
-	exists, err := secretsBackend.RepoCredsExists(ctx, name, project)
+	exists, err := secretsBackend.RepoCredsExists(ctx, name, project, false)
 	if err != nil {
 		return err
 	} else if exists {
@@ -333,7 +333,7 @@ func (db *db) DeleteRepositoryCredentials(ctx context.Context, name, project str
 	}
 
 	legacyBackend := db.legacyRepoBackend()
-	exists, err = legacyBackend.RepoCredsExists(ctx, name, project)
+	exists, err = legacyBackend.RepoCredsExists(ctx, name, project, false)
 	if err != nil {
 		return err
 	} else if exists {
