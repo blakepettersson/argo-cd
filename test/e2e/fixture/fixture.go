@@ -669,9 +669,11 @@ func initTestContainers() {
 
 	repoServerFlags := pflag.NewFlagSet("", pflag.PanicOnError)
 	CheckError(repoServerFlags.Parse([]string{}))
+	reposerverConfig := reposervercommand.NewRepoServerConfig(repoServerFlags).WithDefaultFlags()
+	CheckError(repoServerFlags.Set("redis", endpoint))
 
 	go func() {
-		errors.CheckError(reposervercommand.NewRepoServerConfig(repoServerFlags).WithDefaultFlags().CreateRepoServer(ctx))
+		errors.CheckError(reposerverConfig.CreateRepoServer(ctx))
 	}()
 
 	serverFlags := pflag.NewFlagSet("", pflag.PanicOnError)
@@ -679,6 +681,7 @@ func initTestContainers() {
 	serverConfig := servercommand.NewServerConfig(serverFlags, serverFlags).WithDefaultFlags().WithK8sSettings(namespace.Name, rest.CopyConfig(config))
 	CheckError(serverFlags.Set("redis", endpoint))
 	CheckError(serverFlags.Set("port", strings.Split(apiServerAddress, ":")[1]))
+	CheckError(serverFlags.Set("repo-server", "localhost:8081"))
 
 	argoCDServer = serverConfig.CreateServer(ctx)
 
@@ -710,6 +713,7 @@ func initTestContainers() {
 	CheckError(appControllerConfig.CreateApplicationController(ctx))
 
 	os.Setenv("KUBECONFIG", kubeConfigPath)
+	os.Setenv("ARGOCD_FAKE_IN_CLUSTER", "true")
 }
 
 func EnsureCleanState(t *testing.T, opts ...TestOption) {
