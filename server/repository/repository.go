@@ -69,8 +69,8 @@ var (
 	errPermissionDenied = status.Error(codes.PermissionDenied, "permission denied")
 )
 
-func (s *Server) getRepo(ctx context.Context, url string) (*appsv1.Repository, error) {
-	repo, err := s.db.GetRepository(ctx, url, "")
+func (s *Server) getRepo(ctx context.Context, url, project string) (*appsv1.Repository, error) {
+	repo, err := s.db.GetRepository(ctx, url, project)
 	if err != nil {
 		return nil, errPermissionDenied
 	}
@@ -127,7 +127,7 @@ func (s *Server) List(ctx context.Context, q *repositorypkg.RepoQuery) (*appsv1.
 
 // Get return the requested configured repository by URL and the state of its connections.
 func (s *Server) Get(ctx context.Context, q *repositorypkg.RepoQuery) (*appsv1.Repository, error) {
-	repo, err := s.getRepo(ctx, q.Repo)
+	repo, err := s.getRepo(ctx, q.Repo, q.GetAppProject())
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +212,7 @@ func (s *Server) ListRepositories(ctx context.Context, q *repositorypkg.RepoQuer
 }
 
 func (s *Server) ListRefs(ctx context.Context, q *repositorypkg.RepoQuery) (*apiclient.Refs, error) {
-	repo, err := s.getRepo(ctx, q.Repo)
+	repo, err := s.getRepo(ctx, q.Repo, q.GetAppProject())
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ func (s *Server) ListRefs(ctx context.Context, q *repositorypkg.RepoQuery) (*api
 // ListApps performs discovery of a git repository for potential sources of applications. Used
 // as a convenience to the UI for auto-complete.
 func (s *Server) ListApps(ctx context.Context, q *repositorypkg.RepoAppsQuery) (*repositorypkg.RepoAppsResponse, error) {
-	repo, err := s.getRepo(ctx, q.Repo)
+	repo, err := s.getRepo(ctx, q.Repo, q.GetAppProject())
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +286,7 @@ func (s *Server) GetAppDetails(ctx context.Context, q *repositorypkg.RepoAppDeta
 	if q.Source == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "missing payload in request")
 	}
-	repo, err := s.getRepo(ctx, q.Source.RepoURL)
+	repo, err := s.getRepo(ctx, q.Source.RepoURL, q.GetAppProject())
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +355,7 @@ func (s *Server) GetAppDetails(ctx context.Context, q *repositorypkg.RepoAppDeta
 
 // GetHelmCharts returns list of helm charts in the specified repository
 func (s *Server) GetHelmCharts(ctx context.Context, q *repositorypkg.RepoQuery) (*apiclient.HelmChartsResponse, error) {
-	repo, err := s.getRepo(ctx, q.Repo)
+	repo, err := s.getRepo(ctx, q.Repo, q.GetAppProject())
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +446,7 @@ func (s *Server) UpdateRepository(ctx context.Context, q *repositorypkg.RepoUpda
 		return nil, status.Errorf(codes.InvalidArgument, "missing payload in request")
 	}
 
-	repo, err := s.getRepo(ctx, q.Repo.Repo)
+	repo, err := s.getRepo(ctx, q.Repo.Repo, q.Repo.Project)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +471,7 @@ func (s *Server) Delete(ctx context.Context, q *repositorypkg.RepoQuery) (*repos
 
 // DeleteRepository removes a repository from the configuration
 func (s *Server) DeleteRepository(ctx context.Context, q *repositorypkg.RepoQuery) (*repositorypkg.RepoResponse, error) {
-	repo, err := s.getRepo(ctx, q.Repo)
+	repo, err := s.getRepo(ctx, q.Repo, q.GetAppProject())
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +485,7 @@ func (s *Server) DeleteRepository(ctx context.Context, q *repositorypkg.RepoQuer
 		log.Errorf("error invalidating cache: %v", err)
 	}
 
-	err = s.db.DeleteRepository(ctx, q.Repo, "")
+	err = s.db.DeleteRepository(ctx, q.Repo, q.GetAppProject())
 	return &repositorypkg.RepoResponse{}, err
 }
 
