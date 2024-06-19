@@ -4,10 +4,6 @@ build:
   artifacts:
     - image: quay.io/argoproj/argocd
       runtimeType: go
-      docker:
-        buildArgs:
-          # Change this to the platform your local k8s cluster is running on
-          BUILDPLATFORM: amd64
   local:
     useDockerCLI: false
     useBuildkit: true
