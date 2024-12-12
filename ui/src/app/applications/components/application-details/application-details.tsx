@@ -31,6 +31,7 @@ import {useSidebarTarget} from '../../../sidebar/sidebar';
 
 import './application-details.scss';
 import {TopBarActionMenuExt, AppViewExtension, StatusPanelExtension} from '../../../shared/services/extensions-service';
+import {isValidURL} from "../../../shared/utils";
 
 interface ApplicationDetailsState {
     page: number;
@@ -255,8 +256,8 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{app
                                     <div className='row white-box__details-row'>
                                         <div className='columns small-3'>Image URL:</div>
                                         <div className='columns small-9'>
-                                            {aSource.chart}&nbsp;
-                                            {m.imageUrl && (
+                                            {aSource.repoURL}&nbsp;
+                                            {isValidURL(m.imageUrl) && (
                                                 <a
                                                     title={m.imageUrl}
                                                     onClick={e => {
