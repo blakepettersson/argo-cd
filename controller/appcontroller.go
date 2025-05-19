@@ -2134,7 +2134,7 @@ func (ctrl *ApplicationController) autoSync(app *appv1.Application, syncStatus *
 		logCtx.Infof("Skipping auto-sync: most recent sync already to %s", desiredCommitSHA)
 		return nil, 0
 	} else if selfHeal {
-		shouldSelfHeal, retryAfter := ctrl.shouldSelfHeal(app, alreadyAttempted)
+		shouldSelfHeal, retryAfter := ctrl.shouldSelfHeal(app.Status.OperationState, alreadyAttempted)
 		if app.Status.OperationState != nil && app.Status.OperationState.Operation.Sync != nil {
 			op.Sync.SelfHealAttemptsCount = app.Status.OperationState.Operation.Sync.SelfHealAttemptsCount
 		}
@@ -2236,35 +2236,35 @@ func alreadyAttemptedSync(app *appv1.Application, commitSHA string, commitSHAsMS
 	return reflect.DeepEqual(app.Spec.GetSource(), app.Status.OperationState.SyncResult.Source), app.Status.OperationState.Phase
 }
 
-func (ctrl *ApplicationController) shouldSelfHeal(app *appv1.Application, alreadyAttempted bool) (bool, time.Duration) {
-	if app.Status.OperationState == nil {
+func (ctrl *ApplicationController) shouldSelfHeal(opState *appv1.OperationState, alreadyAttempted bool) (bool, time.Duration) {
+	if opState == nil {
 		return true, time.Duration(0)
-	}
-
-	// Reset counter if the prior sync was successful OR if the revision has changed
-	if !alreadyAttempted || app.Status.Sync.Status == appv1.SyncStatusCodeSynced {
-		app.Status.OperationState.Operation.Sync.SelfHealAttemptsCount = 0
 	}
 
 	var retryAfter time.Duration
 	if ctrl.selfHealBackOff == nil {
-		if app.Status.OperationState.FinishedAt == nil {
+		if opState.FinishedAt == nil {
 			retryAfter = ctrl.selfHealTimeout
 		} else {
-			retryAfter = ctrl.selfHealTimeout - time.Since(app.Status.OperationState.FinishedAt.Time)
+			retryAfter = ctrl.selfHealTimeout - time.Since(opState.FinishedAt.Time)
 		}
 	} else {
+		// Reset counter only if the revision has changed
+		if !alreadyAttempted {
+			opState.Operation.Sync.SelfHealAttemptsCount = 0
+		}
+
 		backOff := *ctrl.selfHealBackOff
-		backOff.Steps = int(app.Status.OperationState.Operation.Sync.SelfHealAttemptsCount)
+		backOff.Steps = int(opState.Operation.Sync.SelfHealAttemptsCount)
 		var delay time.Duration
 		steps := backOff.Steps
 		for i := 0; i < steps; i++ {
 			delay = backOff.Step()
 		}
-		if app.Status.OperationState.FinishedAt == nil {
+		if opState.FinishedAt == nil {
 			retryAfter = delay
 		} else {
-			retryAfter = delay - time.Since(app.Status.OperationState.FinishedAt.Time)
+			retryAfter = delay - time.Since(opState.FinishedAt.Time)
 		}
 	}
 	return retryAfter <= 0, retryAfter
