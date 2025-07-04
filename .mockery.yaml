@@ -2,11 +2,12 @@ dir: '{{.InterfaceDir}}/mocks'
 structname: '{{.InterfaceName}}'
 filename: '{{.InterfaceName}}.go'
 pkgname: mocks
-
-template-data:
-  unroll-variadic: true
-
 packages:
+  github.com/argoproj/argo-cd/v3/notification_controller/controller:
+    config:
+      template: matryer
+    interfaces:
+      NotificationController: {}
   github.com/argoproj/argo-cd/v3/applicationset/generators:
     interfaces:
       Generator: {}
@@ -15,6 +16,8 @@ packages:
       Repos: {}
   github.com/argoproj/argo-cd/v3/applicationset/services/scm_provider:
     config:
+      template-data:
+        unroll-variadic: true
       dir: applicationset/services/scm_provider/aws_codecommit/mocks
     interfaces:
       AWSCodeCommitClient: {}
@@ -23,6 +26,9 @@ packages:
     interfaces:
       Renderer: {}
   github.com/argoproj/argo-cd/v3/commitserver/apiclient:
+    config:
+      template-data:
+        unroll-variadic: true
     interfaces:
       Clientset: {}
       CommitServiceClient: {}
@@ -36,20 +42,35 @@ packages:
     interfaces:
       ClusterServiceServer: {}
   github.com/argoproj/argo-cd/v3/pkg/apiclient/session:
+    config:
+      template-data:
+        unroll-variadic: true
     interfaces:
       SessionServiceClient: {}
       SessionServiceServer: {}
   github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned/typed/application/v1alpha1:
+    config:
+      template-data:
+        unroll-variadic: true
     interfaces:
       AppProjectInterface: {}
   github.com/argoproj/argo-cd/v3/reposerver/apiclient:
+    config:
+      template-data:
+        unroll-variadic: true
     interfaces:
       RepoServerService_GenerateManifestWithFilesClient: {}
       RepoServerServiceClient: {}
   github.com/argoproj/argo-cd/v3/server/application:
+    config:
+      template-data:
+        unroll-variadic: true
     interfaces:
       Broadcaster: {}
   github.com/argoproj/argo-cd/v3/server/extension:
+    config:
+      template-data:
+        unroll-variadic: true
     interfaces:
       ApplicationGetter: {}
       ExtensionMetricsRegistry: {}
@@ -70,6 +91,8 @@ packages:
     interfaces:
       TempPaths: {}
   github.com/argoproj/argo-cd/v3/util/notification/argocd:
+    config:
+      template: matryer
     interfaces:
       Service: {}
   github.com/argoproj/argo-cd/v3/util/workloadidentity:

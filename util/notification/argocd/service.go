@@ -15,11 +15,12 @@ import (
 )
 
 type Service interface {
+	Close()
 	GetCommitMetadata(ctx context.Context, repoURL string, commitSHA string, project string) (*shared.CommitMetadata, error)
 	GetAppDetails(ctx context.Context, app *v1alpha1.Application) (*shared.AppDetail, error)
 }
 
-func NewArgoCDService(clientset kubernetes.Interface, namespace string, repoClientset apiclient.Clientset) (*argoCDService, error) {
+func NewArgoCDService(clientset kubernetes.Interface, namespace string, repoClientset apiclient.Clientset) (Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	settingsMgr := settings.NewSettingsManager(ctx, clientset, namespace)
 	closer, repoClient, err := repoClientset.NewRepoServerClient()

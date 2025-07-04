@@ -65,7 +65,7 @@ func NewController(
 	secretName string,
 	configMapName string,
 	selfServiceNotificationEnabled bool,
-) *notificationController {
+) NotificationController {
 	var appClient dynamic.ResourceInterface
 
 	namespaceableAppClient := client.Resource(applications)

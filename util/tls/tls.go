@@ -59,8 +59,6 @@ type CertOptions struct {
 	ECDSACurve string
 }
 
-type ConfigCustomizer = func(*tls.Config)
-
 // BestEffortSystemCertPool returns system cert pool as best effort, otherwise an empty cert pool
 func BestEffortSystemCertPool() *x509.CertPool {
 	rootCAs, _ := x509.SystemCertPool()
@@ -117,28 +115,28 @@ func tlsVersionsToStr(versions []uint16) []string {
 	return ret
 }
 
-func getTLSConfigCustomizer(minVersionStr, maxVersionStr, tlsCiphersStr string) (ConfigCustomizer, error) {
-	minVersion, err := getTLSVersionByString(minVersionStr)
+func (t *TLSConfig) getTLSConfigCustomizer() error {
+	minVersion, err := getTLSVersionByString(t.MinVersion)
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving TLS version by min version %q: %w", minVersionStr, err)
+		return fmt.Errorf("error retrieving TLS version by min version %q: %w", t.MinVersion, err)
 	}
-	maxVersion, err := getTLSVersionByString(maxVersionStr)
+	maxVersion, err := getTLSVersionByString(t.MaxVersion)
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving TLS version by max version %q: %w", maxVersionStr, err)
+		return fmt.Errorf("error retrieving TLS version by max version %q: %w", t.MaxVersion, err)
 	}
 	if minVersion > maxVersion {
-		return nil, fmt.Errorf("minimum TLS version %s must not be higher than maximum TLS version %s", minVersionStr, maxVersionStr)
+		return fmt.Errorf("minimum TLS version %s must not be higher than maximum TLS version %s", t.MinVersion, t.MaxVersion)
 	}
 
 	// Cipher suites for TLSv1.3 are not configurable
 	if minVersion == tls.VersionTLS13 {
-		if tlsCiphersStr != DefaultTLSCipherSuite {
+		if t.Ciphers != DefaultTLSCipherSuite {
 			log.Warnf("TLSv1.3 cipher suites are not configurable, ignoring value of --tlsciphers")
 		}
-		tlsCiphersStr = ""
+		t.Ciphers = ""
 	}
 
-	if tlsCiphersStr == "list" {
+	if t.Ciphers == "list" {
 		fmt.Printf("Supported TLS ciphers:\n")
 		for _, s := range tls.CipherSuites() {
 			fmt.Printf("* %s (TLS versions: %s)\n", tls.CipherSuiteName(s.ID), strings.Join(tlsVersionsToStr(s.SupportedVersions), ", "))
@@ -147,34 +145,58 @@ func getTLSConfigCustomizer(minVersionStr, maxVersionStr, tlsCiphersStr string) 
 	}
 
 	var cipherSuites []uint16
-	if tlsCiphersStr != "" {
-		cipherSuites, err = getTLSCipherSuitesByString(tlsCiphersStr)
+	if t.Ciphers != "" {
+		cipherSuites, err = getTLSCipherSuitesByString(t.Ciphers)
 		if err != nil {
-			return nil, fmt.Errorf("error retrieving TLS cipher suites: %w", err)
+			return fmt.Errorf("error retrieving TLS cipher suites: %w", err)
 		}
 	} else {
 		cipherSuites = make([]uint16, 0)
 	}
 
-	return func(config *tls.Config) {
-		config.MinVersion = minVersion
-		config.MaxVersion = maxVersion
-		config.CipherSuites = cipherSuites
-	}, nil
+	t.minVersion = minVersion
+	t.maxVersion = maxVersion
+	t.ciphers = cipherSuites
+
+	return nil
 }
 
-// Adds TLS server related command line options to a command and returns a TLS
-// config customizer object, set up to the options specified
-func AddTLSFlagsToCmd(cmd *cobra.Command) func() (ConfigCustomizer, error) {
-	minVersionStr := ""
-	maxVersionStr := ""
-	tlsCiphersStr := ""
-	cmd.Flags().StringVar(&minVersionStr, "tlsminversion", env.StringFromEnv("ARGOCD_TLS_MIN_VERSION", DefaultTLSMinVersion), "The minimum SSL/TLS version that is acceptable (one of: 1.0|1.1|1.2|1.3)")
-	cmd.Flags().StringVar(&maxVersionStr, "tlsmaxversion", env.StringFromEnv("ARGOCD_TLS_MAX_VERSION", DefaultTLSMaxVersion), "The maximum SSL/TLS version that is acceptable (one of: 1.0|1.1|1.2|1.3)")
-	cmd.Flags().StringVar(&tlsCiphersStr, "tlsciphers", env.StringFromEnv("ARGOCD_TLS_CIPHERS", DefaultTLSCipherSuite), "The list of acceptable ciphers to be used when establishing TLS connections. Use 'list' to list available ciphers.")
+// TLSConfig holds TLS configuration options
+type TLSConfig struct {
+	MinVersion string
+	MaxVersion string
+	Ciphers    string
+	KeyPath    string
+	CertPath   string
+	HostList   []string
+	minVersion uint16
+	maxVersion uint16
+	certs      []tls.Certificate
+	ciphers    []uint16
+}
 
-	return func() (ConfigCustomizer, error) {
-		return getTLSConfigCustomizer(minVersionStr, maxVersionStr, tlsCiphersStr)
+// Validate creates a ConfigCustomizer from the TLS configuration
+func (t *TLSConfig) Validate() error {
+	if err := t.getTLSConfigCustomizer(); err != nil {
+		return err
+	}
+
+	return t.createServerTLSConfig()
+}
+
+// AddTLSFlagsToConfig adds TLS flags to a command and populates the provided TLSConfig
+func (t *TLSConfig) AddTLSFlagsToConfig(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&t.MinVersion, "tlsminversion", env.StringFromEnv("ARGOCD_TLS_MIN_VERSION", DefaultTLSMinVersion), "The minimum SSL/TLS version that is acceptable (one of: 1.0|1.1|1.2|1.3)")
+	cmd.Flags().StringVar(&t.MaxVersion, "tlsmaxversion", env.StringFromEnv("ARGOCD_TLS_MAX_VERSION", DefaultTLSMaxVersion), "The maximum SSL/TLS version that is acceptable (one of: 1.0|1.1|1.2|1.3)")
+	cmd.Flags().StringVar(&t.Ciphers, "tlsciphers", env.StringFromEnv("ARGOCD_TLS_CIPHERS", DefaultTLSCipherSuite), "The list of acceptable ciphers to be used when establishing TLS connections. Use 'list' to list available ciphers.")
+}
+
+func (t *TLSConfig) AsNativeTLSConfig() *tls.Config {
+	return &tls.Config{
+		Certificates: t.certs,
+		MinVersion:   t.minVersion,
+		MaxVersion:   t.maxVersion,
+		CipherSuites: t.ciphers,
 	}
 }
 
@@ -391,7 +413,7 @@ func LoadX509Cert(path string) (*x509.Certificate, error) {
 // if these are not given, will generate a self-signed certificate valid for
 // the specified list of hosts. If hosts is nil or empty, self-signed cert
 // creation will be disabled.
-func CreateServerTLSConfig(tlsCertPath, tlsKeyPath string, hosts []string) (*tls.Config, error) {
+func (t *TLSConfig) createServerTLSConfig() error {
 	var cert *tls.Certificate
 	var err error
 
@@ -399,20 +421,20 @@ func CreateServerTLSConfig(tlsCertPath, tlsKeyPath string, hosts []string) (*tls
 	tlsKeyExists := false
 
 	// If cert and key paths were specified, ensure they exist
-	if tlsCertPath != "" && tlsKeyPath != "" {
-		_, err = os.Stat(tlsCertPath)
+	if t.CertPath != "" && t.KeyPath != "" {
+		_, err = os.Stat(t.CertPath)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				log.Warnf("could not read TLS cert from %s: %v", tlsCertPath, err)
+				log.Warnf("could not read TLS cert from %s: %v", t.CertPath, err)
 			}
 		} else {
 			tlsCertExists = true
 		}
 
-		_, err = os.Stat(tlsKeyPath)
+		_, err = os.Stat(t.KeyPath)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				log.Warnf("could not read TLS cert from %s: %v", tlsKeyPath, err)
+				log.Warnf("could not read TLS cert from %s: %v", t.KeyPath, err)
 			}
 		} else {
 			tlsKeyExists = true
@@ -422,22 +444,23 @@ func CreateServerTLSConfig(tlsCertPath, tlsKeyPath string, hosts []string) (*tls
 	if !tlsCertExists || !tlsKeyExists {
 		log.Infof("Generating self-signed TLS certificate for this session")
 		c, err := GenerateX509KeyPair(CertOptions{
-			Hosts:        hosts,
+			Hosts:        t.HostList,
 			Organization: "Argo CD",
 			IsCA:         false,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("error generating X509 key pair: %w", err)
+			return fmt.Errorf("error generating X509 key pair: %w", err)
 		}
 		cert = c
 	} else {
-		log.Infof("Loading TLS configuration from cert=%s and key=%s", tlsCertPath, tlsKeyPath)
-		c, err := tls.LoadX509KeyPair(tlsCertPath, tlsKeyPath)
+		log.Infof("Loading TLS configuration from cert=%s and key=%s", t.CertPath, t.KeyPath)
+		c, err := tls.LoadX509KeyPair(t.CertPath, t.KeyPath)
 		if err != nil {
-			return nil, fmt.Errorf("unable to initialize TLS configuration with cert=%s and key=%s: %w", tlsCertPath, tlsKeyPath, err)
+			return fmt.Errorf("unable to initialize TLS configuration with cert=%s and key=%s: %w", t.CertPath, t.KeyPath, err)
 		}
 		cert = &c
 	}
 
-	return &tls.Config{Certificates: []tls.Certificate{*cert}}, nil
+	t.certs = []tls.Certificate{*cert}
+	return nil
 }

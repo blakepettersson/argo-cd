@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -9,10 +10,13 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/argoproj/argo-cd/v3/reposerver/metrics"
 	"github.com/argoproj/gitops-engine/pkg/utils/text"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -45,6 +49,31 @@ type ClusterRuntimeInfo interface {
 
 func NewCache(cache *cacheutil.Cache, repoCacheExpiration time.Duration, revisionCacheExpiration time.Duration, revisionCacheLockTimeout time.Duration) *Cache {
 	return &Cache{cache, repoCacheExpiration, revisionCacheExpiration, revisionCacheLockTimeout}
+}
+
+// RepoCacheConfig holds repository cache configuration options
+type RepoCacheConfig struct {
+	cacheutil.CacheConfig
+	RepoCacheExpiration      time.Duration
+	RevisionCacheExpiration  time.Duration
+	RevisionCacheLockTimeout time.Duration
+}
+
+func (c *RepoCacheConfig) Build(buildRedisClient func(redisAddress string, password string, username string, redisDB int, maxRetries int, tlsConfig *tls.Config) *redis.Client, buildFailoverRedisClient func(sentinelMaster string, sentinelUsername string, sentinelPassword string, password string, username string, redisDB int, maxRetries int, tlsConfig *tls.Config, sentinelAddresses []string) *redis.Client, server *metrics.MetricsServer, lock *sync.RWMutex) (*Cache, error) {
+	cache, err := c.CreateCache(buildRedisClient, buildFailoverRedisClient, server, lock)
+	if err != nil {
+		return nil, fmt.Errorf("error creating cache: %w", err)
+	}
+	return NewCache(cache, c.RepoCacheExpiration, c.RevisionCacheExpiration, c.RevisionCacheLockTimeout), nil
+}
+
+// AddCacheFlagsToConfig adds cache flags to a command and populates the provided RepoCacheConfig
+func AddCacheFlagsToConfig(cmd *cobra.Command, config *RepoCacheConfig, flagPrefix string) {
+	cmd.Flags().DurationVar(&config.RepoCacheExpiration, flagPrefix+"repo-cache-expiration", env.ParseDurationFromEnv("ARGOCD_REPO_CACHE_EXPIRATION", 24*time.Hour, 0, math.MaxInt64), "Cache expiration for repo state, incl. app lists, app details, manifest generation, revision meta-data")
+	cmd.Flags().DurationVar(&config.RevisionCacheExpiration, flagPrefix+"revision-cache-expiration", env.ParseDurationFromEnv("ARGOCD_RECONCILIATION_TIMEOUT", 3*time.Minute, 0, math.MaxInt64), "Cache expiration for cached revision")
+	cmd.Flags().DurationVar(&config.RevisionCacheLockTimeout, flagPrefix+"revision-cache-lock-timeout", env.ParseDurationFromEnv("ARGOCD_REVISION_CACHE_LOCK_TIMEOUT", 10*time.Second, 0, math.MaxInt64), "Cache TTL for locks to prevent duplicate requests on revisions, set to 0 to disable")
+
+	cacheutil.AddCacheFlagsToConfig(cmd, &config.CacheConfig, flagPrefix)
 }
 
 func AddCacheFlagsToCmd(cmd *cobra.Command, opts ...cacheutil.Options) func() (*Cache, error) {

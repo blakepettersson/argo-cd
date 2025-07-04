@@ -9,8 +9,10 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/argoproj/argo-cd/v3/reposerver/metrics"
 	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -44,7 +46,7 @@ func NewCache(client CacheClient) *Cache {
 	return &Cache{client}
 }
 
-func buildRedisClient(redisAddress, password, username string, redisDB, maxRetries int, tlsConfig *tls.Config) *redis.Client {
+func BuildRedisClient(redisAddress, password, username string, redisDB, maxRetries int, tlsConfig *tls.Config) *redis.Client {
 	opts := &redis.Options{
 		Addr:       redisAddress,
 		Password:   password,
@@ -57,13 +59,13 @@ func buildRedisClient(redisAddress, password, username string, redisDB, maxRetri
 	client := redis.NewClient(opts)
 
 	client.AddHook(redis.Hook(NewArgoRedisHook(func() {
-		*client = *buildRedisClient(redisAddress, password, username, redisDB, maxRetries, tlsConfig)
+		*client = *BuildRedisClient(redisAddress, password, username, redisDB, maxRetries, tlsConfig)
 	})))
 
 	return client
 }
 
-func buildFailoverRedisClient(sentinelMaster, sentinelUsername, sentinelPassword, password, username string, redisDB, maxRetries int, tlsConfig *tls.Config, sentinelAddresses []string) *redis.Client {
+func BuildFailoverRedisClient(sentinelMaster, sentinelUsername, sentinelPassword, password, username string, redisDB, maxRetries int, tlsConfig *tls.Config, sentinelAddresses []string) *redis.Client {
 	opts := &redis.FailoverOptions{
 		MasterName:       sentinelMaster,
 		SentinelAddrs:    sentinelAddresses,
@@ -79,7 +81,7 @@ func buildFailoverRedisClient(sentinelMaster, sentinelUsername, sentinelPassword
 	client := redis.NewFailoverClient(opts)
 
 	client.AddHook(redis.Hook(NewArgoRedisHook(func() {
-		*client = *buildFailoverRedisClient(sentinelMaster, sentinelUsername, sentinelPassword, password, username, redisDB, maxRetries, tlsConfig, sentinelAddresses)
+		*client = *BuildFailoverRedisClient(sentinelMaster, sentinelUsername, sentinelPassword, password, username, redisDB, maxRetries, tlsConfig, sentinelAddresses)
 	})))
 
 	return client
@@ -88,6 +90,102 @@ func buildFailoverRedisClient(sentinelMaster, sentinelUsername, sentinelPassword
 type Options struct {
 	FlagPrefix      string
 	OnClientCreated func(client *redis.Client)
+}
+
+// CacheConfig holds cache configuration options
+type CacheConfig struct {
+	RedisAddress           string
+	SentinelAddresses      []string
+	SentinelMaster         string
+	SentinelUsername       string
+	SentinelPassword       string
+	RedisDB                int
+	RedisCACertificate     string
+	RedisClientCertificate string
+	RedisClientKey         string
+	RedisUseTLS            bool
+	InsecureRedis          bool
+	CompressionStr         string
+	DefaultCacheExpiration time.Duration
+	MaxRetries             int
+	RedisUsername          string
+	RedisPassword          string
+}
+
+// CreateCache creates a Cache from the configuration and calls the OnClientCreated callback
+func (c *CacheConfig) CreateCache(buildRedisClient func(redisAddress string, password string, username string, redisDB int, maxRetries int, tlsConfig *tls.Config) *redis.Client, buildFailoverRedisClient func(sentinelMaster string, sentinelUsername string, sentinelPassword string, password string, username string, redisDB int, maxRetries int, tlsConfig *tls.Config, sentinelAddresses []string) *redis.Client, metricsServer *metrics.MetricsServer, lock *sync.RWMutex) (*Cache, error) {
+	var tlsConfig *tls.Config
+	if c.RedisUseTLS {
+		tlsConfig = &tls.Config{}
+		if c.RedisClientCertificate != "" {
+			clientCert, err := tls.LoadX509KeyPair(c.RedisClientCertificate, c.RedisClientKey)
+			if err != nil {
+				return nil, err
+			}
+			tlsConfig.Certificates = []tls.Certificate{clientCert}
+		}
+		switch {
+		case c.InsecureRedis:
+			tlsConfig.InsecureSkipVerify = true
+		case c.RedisCACertificate != "":
+			redisCA, err := certutil.ParseTLSCertificatesFromPath(c.RedisCACertificate)
+			if err != nil {
+				return nil, err
+			}
+			tlsConfig.RootCAs = certutil.GetCertPoolFromPEMData(redisCA)
+		default:
+			var err error
+			tlsConfig.RootCAs, err = x509.SystemCertPool()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	compression, err := CompressionTypeFromString(c.CompressionStr)
+	if err != nil {
+		return nil, err
+	}
+	if len(c.SentinelAddresses) > 0 {
+		client := buildFailoverRedisClient(c.SentinelMaster, c.SentinelUsername, c.SentinelPassword, c.RedisPassword, c.RedisUsername, c.RedisDB, c.MaxRetries, tlsConfig, c.SentinelAddresses)
+		return NewCache(NewRedisCache(client, c.DefaultCacheExpiration, compression)), nil
+	}
+
+	client := buildRedisClient(c.RedisAddress, c.RedisPassword, c.RedisUsername, c.RedisDB, c.MaxRetries, tlsConfig)
+	return NewCache(NewRedisCache(client, c.DefaultCacheExpiration, compression)), nil
+}
+
+// AddCacheFlagsToConfig adds cache flags to a command and populates the provided CacheConfig
+func AddCacheFlagsToConfig(cmd *cobra.Command, config *CacheConfig, flagPrefix string) {
+	envPrefix := strings.ReplaceAll(strings.ToUpper(flagPrefix), "-", "_")
+
+	config.MaxRetries = env.ParseNumFromEnv(envRedisRetryCount, defaultRedisRetryCount, 0, math.MaxInt32)
+	config.RedisPassword = coalesce(os.Getenv(envPrefix+envRedisPassword), os.Getenv(envRedisPassword))
+	config.RedisUsername = coalesce(os.Getenv(envPrefix+envRedisUsername), os.Getenv(envRedisUsername))
+	config.SentinelPassword = coalesce(os.Getenv(envPrefix+envRedisUsername), os.Getenv(envRedisSentinelPassword))
+	config.SentinelUsername = coalesce(os.Getenv(envPrefix+envRedisUsername), os.Getenv(envRedisSentinelUsername))
+
+	cmd.Flags().StringVar(&config.RedisAddress, flagPrefix+"redis", env.StringFromEnv(envPrefix+"REDIS_SERVER", common.DefaultRedisAddr), "Redis server hostname and port (e.g. argocd-redis:6379). ")
+	cmd.Flags().IntVar(&config.RedisDB, flagPrefix+"redisdb", env.ParseNumFromEnv(envPrefix+"REDISDB", 0, 0, math.MaxInt32), "Redis database.")
+	cmd.Flags().StringArrayVar(&config.SentinelAddresses, flagPrefix+"sentinel", []string{}, "Redis sentinel hostname and port (e.g. argocd-redis-ha-announce-0:6379). ")
+	cmd.Flags().StringVar(&config.SentinelMaster, flagPrefix+"sentinelmaster", "master", "Redis sentinel master group name.")
+	cmd.Flags().DurationVar(&config.DefaultCacheExpiration, flagPrefix+"default-cache-expiration", env.ParseDurationFromEnv("ARGOCD_DEFAULT_CACHE_EXPIRATION", 24*time.Hour, 0, math.MaxInt64), "Cache expiration default")
+	cmd.Flags().BoolVar(&config.RedisUseTLS, flagPrefix+"redis-use-tls", false, "Use TLS when connecting to Redis. ")
+	cmd.Flags().StringVar(&config.RedisClientCertificate, flagPrefix+"redis-client-certificate", "", "Path to Redis client certificate (e.g. /etc/certs/redis/client.crt).")
+	cmd.Flags().StringVar(&config.RedisClientKey, flagPrefix+"redis-client-key", "", "Path to Redis client key (e.g. /etc/certs/redis/client.crt).")
+	cmd.Flags().BoolVar(&config.InsecureRedis, flagPrefix+"redis-insecure-skip-tls-verify", false, "Skip Redis server certificate validation.")
+	cmd.Flags().StringVar(&config.RedisCACertificate, flagPrefix+"redis-ca-certificate", "", "Path to Redis server CA certificate (e.g. /etc/certs/redis/ca.crt). If not specified, system trusted CAs will be used for server certificate validation.")
+	cmd.Flags().StringVar(&config.CompressionStr, flagPrefix+CLIFlagRedisCompress, env.StringFromEnv(envPrefix+"REDIS_COMPRESSION", string(RedisCompressionGZip)), "Enable compression for data sent to Redis with the required compression algorithm. (possible values: gzip, none)")
+}
+
+func coalesce[T comparable](items ...T) T {
+	var zero T
+	for _, x := range items {
+		if x != zero {
+			return x
+		}
+	}
+	return zero
 }
 
 func (o *Options) callOnClientCreated(client *redis.Client) {
@@ -231,7 +329,7 @@ func AddCacheFlagsToCmd(cmd *cobra.Command, opts ...Options) func() (*Cache, err
 			return nil, err
 		}
 		if len(sentinelAddresses) > 0 {
-			client := buildFailoverRedisClient(sentinelMaster, sentinelUsername, sentinelPassword, password, username, redisDB, maxRetries, tlsConfig, sentinelAddresses)
+			client := BuildFailoverRedisClient(sentinelMaster, sentinelUsername, sentinelPassword, password, username, redisDB, maxRetries, tlsConfig, sentinelAddresses)
 			opt.callOnClientCreated(client)
 			return NewCache(NewRedisCache(client, defaultCacheExpiration, compression)), nil
 		}
@@ -239,13 +337,13 @@ func AddCacheFlagsToCmd(cmd *cobra.Command, opts ...Options) func() (*Cache, err
 			redisAddress = common.DefaultRedisAddr
 		}
 
-		client := buildRedisClient(redisAddress, password, username, redisDB, maxRetries, tlsConfig)
+		client := BuildRedisClient(redisAddress, password, username, redisDB, maxRetries, tlsConfig)
 		opt.callOnClientCreated(client)
 		return NewCache(NewRedisCache(client, defaultCacheExpiration, compression)), nil
 	}
 }
 
-// Cache provides strongly types methods to store and retrieve values from shared cache
+// Cache provides strongly typed methods to store and retrieve values from shared cache
 type Cache struct {
 	client CacheClient
 }

@@ -16,6 +16,13 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
+type OTELPOpts struct {
+	Address    string
+	Insecure   bool
+	Headers    map[string]string
+	Attributes []string
+}
+
 // InitTracer initializes the trace provider and the otel grpc exporter.
 func InitTracer(ctx context.Context, serviceName, otlpAddress string, otlpInsecure bool, otlpHeaders map[string]string, otlpAttrs []string) (func(), error) {
 	attrs := make([]attribute.KeyValue, 0, len(otlpAttrs))

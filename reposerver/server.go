@@ -26,10 +26,8 @@ import (
 	"github.com/argoproj/argo-cd/v3/reposerver/metrics"
 	"github.com/argoproj/argo-cd/v3/reposerver/repository"
 	"github.com/argoproj/argo-cd/v3/server/version"
-	"github.com/argoproj/argo-cd/v3/util/env"
 	"github.com/argoproj/argo-cd/v3/util/git"
 	grpc_util "github.com/argoproj/argo-cd/v3/util/grpc"
-	tlsutil "github.com/argoproj/argo-cd/v3/util/tls"
 )
 
 // ArgoCDRepoServer is the repo server implementation
@@ -38,26 +36,8 @@ type ArgoCDRepoServer struct {
 	opts        []grpc.ServerOption
 }
 
-// The hostnames to generate self-signed issues with
-var tlsHostList = []string{"localhost", "reposerver"}
-
 // NewServer returns a new instance of the Argo CD Repo server
-func NewServer(metricsServer *metrics.MetricsServer, cache *reposervercache.Cache, tlsConfCustomizer tlsutil.ConfigCustomizer, initConstants repository.RepoServerInitConstants, gitCredsStore git.CredsStore) (*ArgoCDRepoServer, error) {
-	var tlsConfig *tls.Config
-
-	// Generate or load TLS server certificates to use with this instance of
-	// repository server.
-	if tlsConfCustomizer != nil {
-		var err error
-		certPath := env.StringFromEnv(common.EnvAppConfigPath, common.DefaultAppConfigPath) + "/reposerver/tls/tls.crt"
-		keyPath := env.StringFromEnv(common.EnvAppConfigPath, common.DefaultAppConfigPath) + "/reposerver/tls/tls.key"
-		tlsConfig, err = tlsutil.CreateServerTLSConfig(certPath, keyPath, tlsHostList)
-		if err != nil {
-			return nil, fmt.Errorf("error creating server TLS config: %w", err)
-		}
-		tlsConfCustomizer(tlsConfig)
-	}
-
+func NewServer(metricsServer *metrics.MetricsServer, cache *reposervercache.Cache, tlsConfig *tls.Config, initConstants repository.RepoServerInitConstants, gitCredsStore git.CredsStore) (*ArgoCDRepoServer, error) {
 	var serverMetricsOptions []grpc_prometheus.ServerMetricsOption
 	if os.Getenv(common.EnvEnableGRPCTimeHistogramEnv) == "true" {
 		serverMetricsOptions = append(serverMetricsOptions, grpc_prometheus.WithServerHandlingTimeHistogram())

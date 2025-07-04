@@ -19,7 +19,7 @@ import (
 type Server interface {
 	git.CredsStore
 	AskPassServiceServer
-	Run(path string) error
+	Run() error
 }
 
 // server is a gRPC server that provides a way for an external process (usually git) to access credentials without those
