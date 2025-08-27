@@ -13,30 +13,31 @@ jobs:
       github.event.issue.state == 'closed'
     runs-on: ubuntu-latest
     steps:
-#      - name: Check if commenter is argoproj organization member
-#        id: check-member
-#        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
-#        with:
-#          script: |
-#            try {
-#              const response = await github.rest.orgs.checkMembershipForUser({
-#                org: 'argoproj',
-#                username: context.actor
-#              });
-#              return response.status === 204;
-#            } catch (error) {
-#              if (error.status === 404) {
-#                return false;
-#              }
-#              throw error;
-#            }
-#
-#      - name: Exit if not organization member
-#        if: steps.check-member.outputs.result == 'false'
-#        run: |
-#          echo "❌ Only argoproj organization members can trigger cherry-pick"
-#          echo "User ${{ github.actor }} is not a member of the argoproj organization"
-#          exit 1
+      # For API docs see https://octokit.github.io/rest.js/v22
+      - name: Check if commenter is argoproj organization member
+        id: check-member
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            try {
+              const response = await github.rest.orgs.checkMembershipForUser({
+                org: 'argoproj',
+                username: context.actor
+              });
+              return response.status === 204;
+            } catch (error) {
+              if (error.status === 404) {
+                return false;
+              }
+              throw error;
+            }
+
+      - name: Exit if not organization member
+        if: steps.check-member.outputs.result == 'false'
+        run: |
+          echo "❌ Only argoproj organization members can trigger cherry-pick"
+          echo "User ${{ github.actor }} is not a member of the argoproj organization"
+          exit 1
 
       - name: Get PR details
         id: pr-details
