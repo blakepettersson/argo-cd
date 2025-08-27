@@ -1,0 +1,196 @@
+name: Cherry Pick
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  cherry-pick:
+    name: Cherry Pick
+    if: >
+      github.event.issue.pull_request != '' &&
+      startsWith(github.event.comment.body, '/cherry-pick ') &&
+      github.event.issue.state == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+#      - name: Check if commenter is argoproj organization member
+#        id: check-member
+#        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+#        with:
+#          script: |
+#            try {
+#              const response = await github.rest.orgs.checkMembershipForUser({
+#                org: 'argoproj',
+#                username: context.actor
+#              });
+#              return response.status === 204;
+#            } catch (error) {
+#              if (error.status === 404) {
+#                return false;
+#              }
+#              throw error;
+#            }
+#
+#      - name: Exit if not organization member
+#        if: steps.check-member.outputs.result == 'false'
+#        run: |
+#          echo "❌ Only argoproj organization members can trigger cherry-pick"
+#          echo "User ${{ github.actor }} is not a member of the argoproj organization"
+#          exit 1
+
+      - name: Get PR details
+        id: pr-details
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            
+            // Check if PR was merged
+            if (!pr.data.merged) {
+              core.setFailed('❌ PR must be merged before cherry-picking');
+              return;
+            }
+            
+            return {
+              merged: pr.data.merged,
+              merge_commit_sha: pr.data.merge_commit_sha,
+              title: pr.data.title,
+              number: pr.data.number,
+              base_branch: pr.data.base.ref
+            };
+
+      - name: Parse cherry-pick command
+        id: parse-command
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const comment = context.payload.comment.body.trim();
+            const match = comment.match(/^\/cherry-pick\s+(.+)$/);
+            
+            if (!match) {
+              core.setFailed('❌ Invalid cherry-pick command format. Use: /cherry-pick <branch>');
+              return;
+            }
+            
+            const targetBranch = match[1].trim();
+            
+            // Basic branch name validation
+            if (!/^[a-zA-Z0-9._/-]+$/.test(targetBranch)) {
+              core.setFailed('❌ Invalid branch name format');
+              return;
+            }
+            
+            return {
+              target_branch: targetBranch
+            };
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Cherry pick commit
+        id: cherry-pick
+        run: |
+          set -e
+          
+          PR_DETAILS='${{ steps.pr-details.outputs.result }}'
+          PARSE_RESULT='${{ steps.parse-command.outputs.result }}'
+          
+          MERGE_COMMIT=$(echo "$PR_DETAILS" | jq -r '.merge_commit_sha')
+          TARGET_BRANCH=$(echo "$PARSE_RESULT" | jq -r '.target_branch')
+          PR_TITLE=$(echo "$PR_DETAILS" | jq -r '.title')
+          PR_NUMBER=$(echo "$PR_DETAILS" | jq -r '.number')
+          
+          echo "🍒 Cherry-picking commit $MERGE_COMMIT to branch $TARGET_BRANCH"
+          
+          # Check if target branch exists
+          if ! git show-ref --verify --quiet refs/remotes/origin/$TARGET_BRANCH; then
+            echo "❌ Target branch '$TARGET_BRANCH' does not exist"
+            exit 1
+          fi
+          
+          # Create new branch for cherry-pick
+          CHERRY_PICK_BRANCH="cherry-pick-${PR_NUMBER}-to-${TARGET_BRANCH}"
+          git checkout -b $CHERRY_PICK_BRANCH origin/$TARGET_BRANCH
+          
+          # Perform cherry-pick
+          if git cherry-pick -m 1 $MERGE_COMMIT; then
+            echo "✅ Cherry-pick successful"
+            
+            # Push the new branch
+            git push origin $CHERRY_PICK_BRANCH
+            
+            # Save branch name for PR creation
+            echo "branch_name=$CHERRY_PICK_BRANCH" >> $GITHUB_OUTPUT
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Cherry-pick failed due to conflicts"
+            git cherry-pick --abort
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Create Pull Request
+        if: steps.cherry-pick.outputs.success == 'true'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const prDetails = JSON.parse('${{ steps.pr-details.outputs.result }}');
+            const parseResult = JSON.parse('${{ steps.parse-command.outputs.result }}');
+            
+            const title = `[${parseResult.target_branch}] ${prDetails.title}`;
+            const body = `Cherry-pick of #${prDetails.number} to ${parseResult.target_branch}
+            
+            Original PR: #${prDetails.number}
+            Target branch: ${parseResult.target_branch}
+            Cherry-picked by: @${context.actor}
+            
+            ---
+            
+            🤖 This PR was automatically created by the cherry-pick workflow.`;
+            
+            const { data: pullRequest } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              head: '${{ steps.cherry-pick.outputs.branch_name }}',
+              base: parseResult.target_branch,
+              body: body
+            });
+            
+            // Add comment to original PR
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `🍒 Cherry-pick PR created: #${pullRequest.number}`
+            });
+            
+            console.log(`✅ Created cherry-pick PR: #${pullRequest.number}`);
+
+      - name: Comment on failure
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const parseResult = JSON.parse('${{ steps.parse-command.outputs.result }}' || '{}');
+            const targetBranch = parseResult.target_branch || 'unknown';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `❌ Cherry-pick to \`${targetBranch}\` failed. Please check the workflow logs for details.`
+            });
