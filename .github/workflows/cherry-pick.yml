@@ -159,7 +159,7 @@ jobs:
             const title = `${prDetails.title} (cherry-pick #${prDetails.number})`;
             const body = `Cherry-picked ${prDetails.title} (#${prDetails.number})
             
-            Signed-off-by: ${signoff}`;
+            ${signoff}`;
             
             const { data: pullRequest } = await github.rest.pulls.create({
               owner: context.repo.owner,
