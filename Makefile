@@ -1,4 +1,4 @@
-# Test
+# Test 2
 
 PACKAGE=github.com/argoproj/argo-cd/v3/common
 CURRENT_DIR=$(shell pwd)
