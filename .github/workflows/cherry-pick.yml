@@ -95,10 +95,10 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
 
-      - name: Configure Git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      #- name: Configure Git
+      #  run: |
+      #    git config --global user.name "github-actions[bot]"
+      #    git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Cherry pick commit
         id: cherry-pick
@@ -129,11 +129,15 @@ jobs:
           if git cherry-pick -m 1 $MERGE_COMMIT; then
             echo "✅ Cherry-pick successful"
             
+            # Extract Signed-off-by from the cherry-pick commit
+            SIGNOFF=$(git log -1 --pretty=format:"%B" | grep -E "^Signed-off-by:" || echo "")
+            
             # Push the new branch
             git push origin $CHERRY_PICK_BRANCH
             
-            # Save branch name for PR creation
+            # Save branch name and signoff for PR creation
             echo "branch_name=$CHERRY_PICK_BRANCH" >> $GITHUB_OUTPUT
+            echo "signoff=$SIGNOFF" >> $GITHUB_OUTPUT
             echo "success=true" >> $GITHUB_OUTPUT
           else
             echo "❌ Cherry-pick failed due to conflicts"
@@ -150,17 +154,12 @@ jobs:
           script: |
             const prDetails = JSON.parse('${{ steps.pr-details.outputs.result }}');
             const parseResult = JSON.parse('${{ steps.parse-command.outputs.result }}');
+            const signoff = '${{ steps.cherry-pick.outputs.signoff }}';
             
-            const title = `[${parseResult.target_branch}] ${prDetails.title}`;
-            const body = `Cherry-pick of #${prDetails.number} to ${parseResult.target_branch}
+            const title = `${prDetails.title} (cherry-pick #${prDetails.number})`;
+            const body = `Cherry-picked ${prDetails.title} (#${prDetails.number})
             
-            Original PR: #${prDetails.number}
-            Target branch: ${parseResult.target_branch}
-            Cherry-picked by: @${context.actor}
-            
-            ---
-            
-            🤖 This PR was automatically created by the cherry-pick workflow.`;
+            Signed-off-by: ${signoff}`;
             
             const { data: pullRequest } = await github.rest.pulls.create({
               owner: context.repo.owner,
