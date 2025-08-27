@@ -1,3 +1,5 @@
+# Test
+
 PACKAGE=github.com/argoproj/argo-cd/v3/common
 CURRENT_DIR=$(shell pwd)
 DIST_DIR=${CURRENT_DIR}/dist
