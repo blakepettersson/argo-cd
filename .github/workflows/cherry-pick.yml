@@ -129,6 +129,11 @@ jobs:
             echo "branch_name=$CHERRY_PICK_BRANCH" >> "$GITHUB_OUTPUT"
             echo "signoff=$SIGNOFF" >> "$GITHUB_OUTPUT"
             echo "success=true" >> "$GITHUB_OUTPUT"
+            
+            # Extract PR title and number for simple access
+            PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
+            echo "pr_title=$PR_TITLE" >> "$GITHUB_OUTPUT"
+            echo "pr_number=#$PR_NUMBER" >> "$GITHUB_OUTPUT"
           else
             echo "❌ Cherry-pick failed due to conflicts"
             git cherry-pick --abort
@@ -142,12 +147,12 @@ jobs:
         uses: octokit/request-action@v2.x
         with:
           route: POST /repos/${{ github.repository }}/pulls
-          title: "${{ fromJSON(steps.pr-details.outputs.result).title }} (cherry-pick ${{ format('#{0}', fromJSON(steps.pr-details.outputs.result).number) }})"
+          title: "${{ steps.cherry-pick.outputs.pr_title }} (cherry-pick ${{ steps.cherry-pick.outputs.pr_number }})"
           head: "${{ steps.cherry-pick.outputs.branch_name }}"
           base: "${{ fromJSON(steps.parse-command.outputs.result).target_branch }}"
           body: |
             |
-            Cherry-picked ${{ fromJSON(steps.pr-details.outputs.result).title }} (#${{ fromJSON(steps.pr-details.outputs.result).number }})
+            Cherry-picked ${{ steps.cherry-pick.outputs.pr_title }} (${{ steps.cherry-pick.outputs.pr_number }})
             
             ${{ steps.cherry-pick.outputs.signoff }}
         env:
