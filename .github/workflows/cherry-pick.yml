@@ -143,29 +143,37 @@ jobs:
 
       - name: Create Pull Request
         if: steps.cherry-pick.outputs.success == 'true'
-        id: create-pr
-        uses: octokit/request-action@v2.x
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
-          route: POST /repos/${{ github.repository }}/pulls
-          title: "${{ steps.cherry-pick.outputs.pr_title }} (cherry-pick ${{ steps.cherry-pick.outputs.pr_number }})"
-          head: "${{ steps.cherry-pick.outputs.branch_name }}"
-          base: "${{ fromJSON(steps.parse-command.outputs.result).target_branch }}"
-          body: |
-            |
-            Cherry-picked ${{ steps.cherry-pick.outputs.pr_title }} (${{ steps.cherry-pick.outputs.pr_number }})
+          github-token: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
+          script: |
+            const prDetails = JSON.parse('${{ steps.pr-details.outputs.result }}');
+            const parseResult = JSON.parse('${{ steps.parse-command.outputs.result }}');
+            const signoff = '${{ steps.cherry-pick.outputs.signoff }}';
             
-            ${{ steps.cherry-pick.outputs.signoff }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
-
-      - name: Comment on original PR
-        if: steps.cherry-pick.outputs.success == 'true'
-        uses: octokit/request-action@v2.x
-        with:
-          route: POST /repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments
-          body: "🍒 Cherry-pick PR created: #${{ steps.create-pr.outputs.result }}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
+            const title = `${prDetails.title} (cherry-pick #${prDetails.number})`;
+            const body = `Cherry-picked ${prDetails.title} (#${prDetails.number})
+            
+            ${signoff}`;
+            
+            const { data: pullRequest } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              head: '${{ steps.cherry-pick.outputs.branch_name }}',
+              base: parseResult.target_branch,
+              body: body
+            });
+            
+            // Add comment to original PR
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `🍒 Cherry-pick PR created: #${pullRequest.number}`
+            });
+            
+            console.log(`✅ Created cherry-pick PR: #${pullRequest.number}`);
 
       - name: Comment on failure
         if: failure()
