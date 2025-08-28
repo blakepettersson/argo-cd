@@ -96,33 +96,33 @@ jobs:
           echo "🍒 Cherry-picking commit $MERGE_COMMIT to branch $TARGET_BRANCH"
           
           # Check if target branch exists
-          if ! git show-ref --verify --quiet refs/remotes/origin/$TARGET_BRANCH; then
+          if ! git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
             echo "❌ Target branch '$TARGET_BRANCH' does not exist"
             exit 1
           fi
           
           # Create new branch for cherry-pick
           CHERRY_PICK_BRANCH="cherry-pick-${PR_NUMBER}-to-${TARGET_BRANCH}"
-          git checkout -b $CHERRY_PICK_BRANCH origin/$TARGET_BRANCH
+          git checkout -b "$CHERRY_PICK_BRANCH" "origin/$TARGET_BRANCH"
           
           # Perform cherry-pick
-          if git cherry-pick -m 1 $MERGE_COMMIT; then
+          if git cherry-pick -m 1 "$MERGE_COMMIT"; then
             echo "✅ Cherry-pick successful"
             
             # Extract Signed-off-by from the cherry-pick commit
             SIGNOFF=$(git log -1 --pretty=format:"%B" | grep -E "^Signed-off-by:" || echo "")
             
             # Push the new branch
-            git push origin $CHERRY_PICK_BRANCH
+            git push origin "$CHERRY_PICK_BRANCH"
             
             # Save branch name and signoff for PR creation
-            echo "branch_name=$CHERRY_PICK_BRANCH" >> $GITHUB_OUTPUT
-            echo "signoff=$SIGNOFF" >> $GITHUB_OUTPUT
-            echo "success=true" >> $GITHUB_OUTPUT
+            echo "branch_name=$CHERRY_PICK_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "signoff=$SIGNOFF" >> "$GITHUB_OUTPUT"
+            echo "success=true" >> "$GITHUB_OUTPUT"
           else
             echo "❌ Cherry-pick failed due to conflicts"
             git cherry-pick --abort
-            echo "success=false" >> $GITHUB_OUTPUT
+            echo "success=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
