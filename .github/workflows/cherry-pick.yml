@@ -32,14 +32,26 @@ jobs:
 
       - name: Get PR details
         id: pr-details
-        uses: octokit/request-action@v2.x
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
-          route: GET /repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
+          github-token: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            return {
+              merged: pr.merged,
+              merge_commit_sha: pr.merge_commit_sha,
+              title: pr.title,
+              number: pr.number,
+              base_branch: pr.base.ref
+            };
 
       - name: Check if PR was merged
-        if: fromJSON(steps.pr-details.outputs.data).merged == false
+        if: fromJSON(steps.pr-details.outputs.result).merged == false
         run: |
           echo "❌ PR must be merged before cherry-picking"
           exit 1
@@ -85,7 +97,7 @@ jobs:
         run: |
           set -e
 
-          PR_DATA="${{ steps.pr-details.outputs.data }}"
+          PR_DATA="${{ steps.pr-details.outputs.result }}"
           PARSE_RESULT="${{ steps.parse-command.outputs.result }}"
           
           MERGE_COMMIT=$(echo "$PR_DATA" | jq -r '.merge_commit_sha')
@@ -132,7 +144,7 @@ jobs:
         with:
           github-token: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
           script: |
-            const prData = JSON.parse('${{ steps.pr-details.outputs.data }}');
+            const prData = JSON.parse('${{ steps.pr-details.outputs.result }}');
             const parseResult = JSON.parse('${{ steps.parse-command.outputs.result }}');
             const signoff = '${{ steps.cherry-pick.outputs.signoff }}';
             
