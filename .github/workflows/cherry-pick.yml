@@ -142,14 +142,14 @@ jobs:
         uses: octokit/request-action@v2.x
         with:
           route: POST /repos/${{ github.repository }}/pulls
-          title: "${{ fromJSON(steps.pr-details.outputs.result).title }} (cherry-pick #${{ fromJSON(steps.pr-details.outputs.result).number }})"
+          title: "${{ fromJSON(steps.pr-details.outputs.result).title }} (cherry-pick \#${{ fromJSON(steps.pr-details.outputs.result).number }})"
           head: "${{ steps.cherry-pick.outputs.branch_name }}"
           base: "${{ fromJSON(steps.parse-command.outputs.result).target_branch }}"
           body: |
             |
             Cherry-picked ${{ fromJSON(steps.pr-details.outputs.result).title }} (#${{ fromJSON(steps.pr-details.outputs.result).number }})
             
-            ${{ steps.cherry-pick.outputs.signoff }}"
+            ${{ steps.cherry-pick.outputs.signoff }}
         env:
           GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
 
