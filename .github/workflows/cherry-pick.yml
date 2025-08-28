@@ -13,27 +13,18 @@ jobs:
       github.event.issue.state == 'closed'
     runs-on: ubuntu-latest
     steps:
-      # For API docs see https://octokit.github.io/rest.js/v22
+      # For API docs see https://docs.github.com/en/rest/
       - name: Check if commenter is argoproj organization member
         id: check-member
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        uses: octokit/request-action@v2.x
         with:
-          script: |
-            try {
-              const response = await github.rest.orgs.checkMembershipForUser({
-                org: 'argoproj',
-                username: context.actor
-              });
-              return response.status === 204;
-            } catch (error) {
-              if (error.status === 404) {
-                return false;
-              }
-              throw error;
-            }
+          route: GET /orgs/argoproj/members/${{ github.actor }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
+        continue-on-error: true
 
       - name: Exit if not organization member
-        if: steps.check-member.outputs.result == 'false'
+        if: steps.check-member.outputs.status != '204'
         run: |
           echo "❌ Only argoproj organization members can trigger cherry-pick"
           echo "User ${{ github.actor }} is not a member of the argoproj organization"
@@ -41,29 +32,17 @@ jobs:
 
       - name: Get PR details
         id: pr-details
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        uses: octokit/request-action@v2.x
         with:
-          script: |
-            const prNumber = context.issue.number;
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber
-            });
-            
-            // Check if PR was merged
-            if (!pr.data.merged) {
-              core.setFailed('❌ PR must be merged before cherry-picking');
-              return;
-            }
-            
-            return {
-              merged: pr.data.merged,
-              merge_commit_sha: pr.data.merge_commit_sha,
-              title: pr.data.title,
-              number: pr.data.number,
-              base_branch: pr.data.base.ref
-            };
+          route: GET /repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
+
+      - name: Check if PR was merged
+        if: fromJSON(steps.pr-details.outputs.data).merged == false
+        run: |
+          echo "❌ PR must be merged before cherry-picking"
+          exit 1
 
       - name: Parse cherry-pick command
         id: parse-command
@@ -106,13 +85,13 @@ jobs:
         run: |
           set -e
           
-          PR_DETAILS='${{ steps.pr-details.outputs.result }}'
+          PR_DATA='${{ steps.pr-details.outputs.data }}'
           PARSE_RESULT='${{ steps.parse-command.outputs.result }}'
           
-          MERGE_COMMIT=$(echo "$PR_DETAILS" | jq -r '.merge_commit_sha')
+          MERGE_COMMIT=$(echo "$PR_DATA" | jq -r '.merge_commit_sha')
           TARGET_BRANCH=$(echo "$PARSE_RESULT" | jq -r '.target_branch')
-          PR_TITLE=$(echo "$PR_DETAILS" | jq -r '.title')
-          PR_NUMBER=$(echo "$PR_DETAILS" | jq -r '.number')
+          PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
+          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.number')
           
           echo "🍒 Cherry-picking commit $MERGE_COMMIT to branch $TARGET_BRANCH"
           
@@ -149,16 +128,17 @@ jobs:
 
       - name: Create Pull Request
         if: steps.cherry-pick.outputs.success == 'true'
+        id: create-pr
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           github-token: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
           script: |
-            const prDetails = JSON.parse('${{ steps.pr-details.outputs.result }}');
+            const prData = JSON.parse('${{ steps.pr-details.outputs.data }}');
             const parseResult = JSON.parse('${{ steps.parse-command.outputs.result }}');
             const signoff = '${{ steps.cherry-pick.outputs.signoff }}';
             
-            const title = `${prDetails.title} (cherry-pick #${prDetails.number})`;
-            const body = `Cherry-picked ${prDetails.title} (#${prDetails.number})
+            const title = `${prData.title} (cherry-pick #${prData.number})`;
+            const body = `Cherry-picked ${prData.title} (#${prData.number})
             
             ${signoff}`;
             
@@ -171,28 +151,22 @@ jobs:
               body: body
             });
             
-            // Add comment to original PR
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `🍒 Cherry-pick PR created: #${pullRequest.number}`
-            });
-            
-            console.log(`✅ Created cherry-pick PR: #${pullRequest.number}`);
+            return pullRequest.number;
+
+      - name: Comment on original PR
+        if: steps.cherry-pick.outputs.success == 'true'
+        uses: octokit/request-action@v2.x
+        with:
+          route: POST /repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments
+          body: "🍒 Cherry-pick PR created: #${{ steps.create-pr.outputs.result }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
 
       - name: Comment on failure
         if: failure()
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        uses: octokit/request-action@v2.x
         with:
-          github-token: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
-          script: |
-            const parseResult = JSON.parse('${{ steps.parse-command.outputs.result }}' || '{}');
-            const targetBranch = parseResult.target_branch || 'unknown';
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `❌ Cherry-pick to \`${targetBranch}\` failed. Please check the workflow logs for details.`
-            });
+          route: POST /repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments
+          body: "❌ Cherry-pick failed. Please check the workflow logs for details."
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
