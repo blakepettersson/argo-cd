@@ -97,8 +97,8 @@ jobs:
         run: |
           set -e
 
-          PR_DATA="${{ steps.pr-details.outputs.result }}"
-          PARSE_RESULT="${{ steps.parse-command.outputs.result }}"
+          PR_DATA='${{ steps.pr-details.outputs.result }}'
+          PARSE_RESULT='${{ steps.parse-command.outputs.result }}'
           
           MERGE_COMMIT=$(echo "$PR_DATA" | jq -r '.merge_commit_sha')
           TARGET_BRANCH=$(echo "$PARSE_RESULT" | jq -r '.target_branch')
