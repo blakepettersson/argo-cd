@@ -140,29 +140,18 @@ jobs:
       - name: Create Pull Request
         if: steps.cherry-pick.outputs.success == 'true'
         id: create-pr
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        uses: octokit/request-action@v2.x
         with:
-          github-token: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
-          script: |
-            const prData = JSON.parse('${{ steps.pr-details.outputs.result }}');
-            const parseResult = JSON.parse('${{ steps.parse-command.outputs.result }}');
-            const signoff = '${{ steps.cherry-pick.outputs.signoff }}';
+          route: POST /repos/${{ github.repository }}/pulls
+          title: "${{ fromJSON(steps.pr-details.outputs.result).title }} (cherry-pick #${{ fromJSON(steps.pr-details.outputs.result).number }})"
+          head: "${{ steps.cherry-pick.outputs.branch_name }}"
+          base: "${{ fromJSON(steps.parse-command.outputs.result).target_branch }}"
+          body: |
+            Cherry-picked ${{ fromJSON(steps.pr-details.outputs.result).title }} (#${{ fromJSON(steps.pr-details.outputs.result).number }})
             
-            const title = `${prData.title} (cherry-pick #${prData.number})`;
-            const body = `Cherry-picked ${prData.title} (#${prData.number})
-            
-            ${signoff}`;
-            
-            const { data: pullRequest } = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              head: '${{ steps.cherry-pick.outputs.branch_name }}',
-              base: parseResult.target_branch,
-              body: body
-            });
-            
-            return pullRequest.number;
+            ${{ steps.cherry-pick.outputs.signoff }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
 
       - name: Comment on original PR
         if: steps.cherry-pick.outputs.success == 'true'
