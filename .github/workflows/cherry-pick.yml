@@ -8,9 +8,8 @@ jobs:
   cherry-pick:
     name: Cherry Pick
     if: >
-      github.event.issue.pull_request != '' &&
-      startsWith(github.event.comment.body, '/cherry-pick ') &&
-      github.event.issue.state == 'closed'
+      github.event.issue.pull_request != '' && github.event.issue.state == 'closed' &&
+      startsWith(github.event.comment.body, '/cherry-pick ')
     runs-on: ubuntu-latest
     steps:
       # For API docs see https://docs.github.com/en/rest/
@@ -146,10 +145,7 @@ jobs:
           title: "${{ fromJSON(steps.pr-details.outputs.result).title }} (cherry-pick #${{ fromJSON(steps.pr-details.outputs.result).number }})"
           head: "${{ steps.cherry-pick.outputs.branch_name }}"
           base: "${{ fromJSON(steps.parse-command.outputs.result).target_branch }}"
-          body: |
-            Cherry-picked ${{ fromJSON(steps.pr-details.outputs.result).title }} (#${{ fromJSON(steps.pr-details.outputs.result).number }})
-            
-            ${{ steps.cherry-pick.outputs.signoff }}
+          body: "Cherry-picked ${{ fromJSON(steps.pr-details.outputs.result).title }} (#${{ fromJSON(steps.pr-details.outputs.result).number }})\n\n${{ steps.cherry-pick.outputs.signoff }}"
         env:
           GITHUB_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
 
