@@ -82,15 +82,14 @@ jobs:
 
       - name: Cherry pick commit
         id: cherry-pick
+        env:
+          PR_DATA: ${{ steps.pr-details.outputs.data }}
+          PARSE_RESULT: ${{ steps.parse-command.outputs.result }}
         run: |
           set -e
-          
-          PR_DATA='${{ steps.pr-details.outputs.data }}'
-          PARSE_RESULT='${{ steps.parse-command.outputs.result }}'
-          
+
           MERGE_COMMIT=$(echo "$PR_DATA" | jq -r '.merge_commit_sha')
           TARGET_BRANCH=$(echo "$PARSE_RESULT" | jq -r '.target_branch')
-          PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
           PR_NUMBER=$(echo "$PR_DATA" | jq -r '.number')
           
           echo "🍒 Cherry-picking commit $MERGE_COMMIT to branch $TARGET_BRANCH"
@@ -110,7 +109,7 @@ jobs:
             echo "✅ Cherry-pick successful"
             
             # Extract Signed-off-by from the cherry-pick commit
-            SIGNOFF=$(git log -1 --pretty=format:"%B" | grep -E "^Signed-off-by:" || echo "")
+            SIGNOFF=$(git log -1 --pretty=format:"%B" | grep -E '^Signed-off-by:' || echo "")
             
             # Push the new branch
             git push origin "$CHERRY_PICK_BRANCH"
