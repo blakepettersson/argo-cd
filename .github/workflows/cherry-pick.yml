@@ -10,7 +10,10 @@ jobs:
   cherry-pick:
     name: Cherry Pick
     if: |
-      github.event.pull_request.merged == true && startsWith(github.event.label.name, 'cherry-pick-')
+      github.event.pull_request.merged == true && (
+        (github.event.action == 'labeled' && startsWith(github.event.label.name, 'cherry-pick-')) ||
+        (github.event.action == 'closed' && contains(toJSON(github.event.pull_request.labels.*.name), 'cherry-pick-'))
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -32,9 +35,16 @@ jobs:
           # Extract data directly from GitHub event context
           MERGE_COMMIT="${{ github.event.pull_request.merge_commit_sha }}"
           
-          # Extract target branch from the label that was just added
-          TARGET_BRANCH="${{ github.event.label.name }}"
-          TARGET_BRANCH="release-${TARGET_BRANCH#cherry-pick-}"  # Remove 'cherry-pick-' prefix with `release-` prefix
+          # Extract target branch from labels
+          if [[ "${{ github.event.action }}" == "labeled" ]]; then
+            # Label was just added - use it directly
+            CHERRY_PICK_LABEL="${{ github.event.label.name }}"
+          else
+            # PR was closed - find cherry-pick label from all labels
+            CHERRY_PICK_LABEL=$(echo '${{ toJSON(github.event.pull_request.labels) }}' | jq -r '.[] | select(.name | startswith("cherry-pick-")) | .name' | head -1)
+          fi
+          
+          TARGET_BRANCH="release-${CHERRY_PICK_LABEL#cherry-pick-}"  # Remove 'cherry-pick-' prefix with `release-` prefix
           
           echo "🍒 Cherry-picking commit $MERGE_COMMIT to branch $TARGET_BRANCH"
           
