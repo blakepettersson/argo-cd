@@ -10,9 +10,7 @@ jobs:
   cherry-pick:
     name: Cherry Pick
     if: |
-      github.event.pull_request.merged == true && 
-      contains(github.event.pull_request.labels.*.name, 'cherry-pick-') &&
-      startsWith(github.event.label.name, 'cherry-pick-')
+      github.event.pull_request.merged == true && startsWith(github.event.label.name, 'cherry-pick-')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
