@@ -91,7 +91,7 @@ jobs:
           
           # Comment on original PR
           gh pr comment ${{ github.event.pull_request.number }} \
-            --body "🍒 Cherry-pick PR created: $(gh pr list --head ${{ steps.cherry-pick.outputs.branch_name }} --json number --jq '.[0].number')"
+            --body "🍒 Cherry-pick PR created: #$(gh pr list --head ${{ steps.cherry-pick.outputs.branch_name }} --json number --jq '.[0].number')"
         env:
           GH_TOKEN: ${{ secrets.CHERRY_PICK_TOKEN || github.token }}
 
