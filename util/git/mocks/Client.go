@@ -427,6 +427,57 @@ func (_c *Client_CommitSHA_Call) RunAndReturn(run func() (string, error)) *Clien
 	return _c
 }
 
+// ConfigureSparseCheckout provides a mock function for the type Client
+func (_mock *Client) ConfigureSparseCheckout(paths []string) error {
+	ret := _mock.Called(paths)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ConfigureSparseCheckout")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func([]string) error); ok {
+		r0 = returnFunc(paths)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// Client_ConfigureSparseCheckout_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ConfigureSparseCheckout'
+type Client_ConfigureSparseCheckout_Call struct {
+	*mock.Call
+}
+
+// ConfigureSparseCheckout is a helper method to define mock.On call
+//   - paths []string
+func (_e *Client_Expecter) ConfigureSparseCheckout(paths interface{}) *Client_ConfigureSparseCheckout_Call {
+	return &Client_ConfigureSparseCheckout_Call{Call: _e.mock.On("ConfigureSparseCheckout", paths)}
+}
+
+func (_c *Client_ConfigureSparseCheckout_Call) Run(run func(paths []string)) *Client_ConfigureSparseCheckout_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 []string
+		if args[0] != nil {
+			arg0 = args[0].([]string)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *Client_ConfigureSparseCheckout_Call) Return(err error) *Client_ConfigureSparseCheckout_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *Client_ConfigureSparseCheckout_Call) RunAndReturn(run func(paths []string) error) *Client_ConfigureSparseCheckout_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Fetch provides a mock function for the type Client
 func (_mock *Client) Fetch(revision string, depth int64) error {
 	ret := _mock.Called(revision, depth)
@@ -480,6 +531,57 @@ func (_c *Client_Fetch_Call) Return(err error) *Client_Fetch_Call {
 }
 
 func (_c *Client_Fetch_Call) RunAndReturn(run func(revision string, depth int64) error) *Client_Fetch_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// FetchPartial provides a mock function for the type Client
+func (_mock *Client) FetchPartial(revision string) error {
+	ret := _mock.Called(revision)
+
+	if len(ret) == 0 {
+		panic("no return value specified for FetchPartial")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(string) error); ok {
+		r0 = returnFunc(revision)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// Client_FetchPartial_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FetchPartial'
+type Client_FetchPartial_Call struct {
+	*mock.Call
+}
+
+// FetchPartial is a helper method to define mock.On call
+//   - revision string
+func (_e *Client_Expecter) FetchPartial(revision interface{}) *Client_FetchPartial_Call {
+	return &Client_FetchPartial_Call{Call: _e.mock.On("FetchPartial", revision)}
+}
+
+func (_c *Client_FetchPartial_Call) Run(run func(revision string)) *Client_FetchPartial_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 string
+		if args[0] != nil {
+			arg0 = args[0].(string)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *Client_FetchPartial_Call) Return(err error) *Client_FetchPartial_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *Client_FetchPartial_Call) RunAndReturn(run func(revision string) error) *Client_FetchPartial_Call {
 	_c.Call.Return(run)
 	return _c
 }
