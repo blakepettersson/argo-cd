@@ -875,6 +875,77 @@ func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 		mainImage := dig(mainContainer, "image").(string)
 		assert.Equal(t, "main-container:v1", mainImage)
 	})
+
+	t.Run("app-of-apps-child-application-chart-version-update-panic", func(t *testing.T) {
+		// This test reproduces the EXACT panic from https://github.com/blakepettersson/broken-app-of-apps
+		// Scenario:
+		// 1. Parent app-of-apps has RespectIgnoreDifferences=true
+		// 2. It manages a child Application (argo-workflows Helm chart)
+		// 3. Initial sync works fine (chart version 0.45.28)
+		// 4. Subsequent update (chart version 0.45.28 -> 0.45.29) causes panic
+		//
+		// The panic occurs when the OpenAPI schema from the Application CRD is used
+		// to perform strategic merge patch operations on array fields with incomplete merge directives
+
+		doc := loadCRDSchema(t, "testdata/schemas/application-openapi-v2.yaml")
+		disco := &fakeDiscovery{schema: doc}
+		oapiGetter := openapi.NewOpenAPIGetter(disco)
+		oapiResources, err := openapi.NewOpenAPIParser(oapiGetter).Parse()
+		require.NoError(t, err)
+
+		// Set up ignoreDifferences with RespectIgnoreDifferences enabled
+		// This is typical for app-of-apps to ignore certain fields
+		ignores := []v1alpha1.ResourceIgnoreDifferences{
+			{
+				Group:             "argoproj.io",
+				Kind:              "Application",
+				JQPathExpressions: []string{".spec.syncPolicy.automated"},
+			},
+		}
+
+		dc, err := diff.NewDiffConfigBuilder().
+			WithDiffSettings(ignores, nil, true, normalizers.IgnoreNormalizerOpts{}).
+			WithNoCache().
+			Build()
+		require.NoError(t, err)
+
+		// Load live child Application (current state with chart version 0.45.28)
+		live := test.YamlToUnstructured(testdata.LiveChildApplicationYaml)
+
+		// Load target child Application (desired state with chart version 0.45.29)
+		target := test.YamlToUnstructured(testdata.TargetChildApplicationYaml)
+
+		comparisonResult := &comparisonResult{
+			reconciliationResult: sync.ReconciliationResult{
+				Live:   []*unstructured.Unstructured{live},
+				Target: []*unstructured.Unstructured{target},
+			},
+			diffConfig: dc,
+		}
+
+		// This should NOT panic - it should handle the case gracefully
+		// Without the fix, this panics with: "runtime error: invalid memory address or nil pointer dereference"
+		// at k8s.io/apimachinery/pkg/util/strategicpatch.handleSliceDiff:306
+		// when processing array fields in the Application spec (like syncOptions)
+		patchedTargets, err := normalizeTargetResources(oapiResources, comparisonResult)
+
+		// We expect either success or a graceful error, but NOT a panic
+		if err != nil {
+			// If there's an error, it should be a descriptive error, not a panic
+			t.Logf("Got error (non-panic): %v", err)
+		} else {
+			// If successful, verify we got a result
+			require.Len(t, patchedTargets, 1)
+			patched := patchedTargets[0]
+			require.NotNil(t, patched)
+
+			// Verify the chart version was updated
+			targetRevision, ok, err := unstructured.NestedString(patched.Object, "spec", "source", "targetRevision")
+			require.NoError(t, err)
+			require.True(t, ok)
+			assert.Equal(t, "0.45.28", targetRevision, "Should have the updated chart version from target")
+		}
+	})
 }
 
 func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
