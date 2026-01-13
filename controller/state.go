@@ -23,6 +23,8 @@ import (
 	"github.com/argoproj/gitops-engine/pkg/sync/syncwaves"
 	kubeutil "github.com/argoproj/gitops-engine/pkg/utils/kube"
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -31,6 +33,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/common"
 	statecache "github.com/argoproj/argo-cd/v3/controller/cache"
 	"github.com/argoproj/argo-cd/v3/controller/metrics"
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha0"
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	appclientset "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
@@ -120,6 +123,7 @@ type appStateManager struct {
 	liveStateCache        statecache.LiveStateCache
 	cache                 *appstatecache.Cache
 	namespace             string
+	controllerName        string
 	statusRefreshTimeout  time.Duration
 	resourceTracking      argo.ResourceTracking
 	persistResourceHealth bool
@@ -127,6 +131,11 @@ type appStateManager struct {
 	repoErrorGracePeriod  time.Duration
 	serverSideDiff        bool
 	ignoreNormalizerOpts  normalizers.IgnoreNormalizerOpts
+	// auditLogger is used to emit events on Repository CRDs when connection issues occur
+	auditLogger *argo.AuditLogger
+	// repoConnectionHealthy tracks the last known connection state per repo URL for state-transition events.
+	// Only emits events when state changes (healthy->failed or failed->healthy).
+	repoConnectionHealthy goSync.Map
 }
 
 // GetRepoObjs will generate the manifests for the given application delegating the
@@ -340,8 +349,15 @@ func (m *appStateManager) GetRepoObjs(ctx context.Context, app *v1alpha1.Applica
 			InstallationID:                  installationID,
 		})
 		if err != nil {
+			// Emit event on Repository CRD if this is a connection-related error
+			if isConnectionError(err) {
+				m.emitRepoConnectionFailedEvent(source.RepoURL, err)
+			}
 			return nil, nil, false, fmt.Errorf("failed to generate manifest for source %d of %d: %w", i+1, len(sources), err)
 		}
+
+		// Emit success event on Repository CRD when manifest generation succeeds
+		m.emitRepoConnectionSuccessEvent(source.RepoURL)
 
 		targetObj, err := unmarshalManifests(manifestInfo.Manifests)
 		if err != nil {
@@ -1134,6 +1150,7 @@ func NewAppStateManager(
 	appclientset appclientset.Interface,
 	repoClientset apiclient.Clientset,
 	namespace string,
+	controllerName string,
 	kubectl kubeutil.Kubectl,
 	onKubectlRun kubeutil.OnKubectlRunFunc,
 	settingsMgr *settings.SettingsManager,
@@ -1146,6 +1163,7 @@ func NewAppStateManager(
 	repoErrorGracePeriod time.Duration,
 	serverSideDiff bool,
 	ignoreNormalizerOpts normalizers.IgnoreNormalizerOpts,
+	auditLogger *argo.AuditLogger,
 ) AppStateManager {
 	return &appStateManager{
 		liveStateCache:        liveStateCache,
@@ -1156,6 +1174,7 @@ func NewAppStateManager(
 		onKubectlRun:          onKubectlRun,
 		repoClientset:         repoClientset,
 		namespace:             namespace,
+		controllerName:        controllerName,
 		settingsMgr:           settingsMgr,
 		metricsServer:         metricsServer,
 		statusRefreshTimeout:  statusRefreshTimeout,
@@ -1164,6 +1183,239 @@ func NewAppStateManager(
 		repoErrorGracePeriod:  repoErrorGracePeriod,
 		serverSideDiff:        serverSideDiff,
 		ignoreNormalizerOpts:  ignoreNormalizerOpts,
+		auditLogger:           auditLogger,
+	}
+}
+
+// isConnectionError returns true if the error is likely a connection-related error
+// such as network failures, timeouts, or service unavailability.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Aborted:
+		return true
+	default:
+		return false
+	}
+}
+
+// findRepositoryByURL finds a Repository CRD by its URL using the repository informer.
+// Returns nil if no matching repository is found or if the informer is not configured.
+func (m *appStateManager) findRepositoryByURL(repoURL string) *v1alpha0.Repository {
+	repoInformer := m.settingsMgr.GetRepositoryInformer()
+	if repoInformer == nil {
+		return nil
+	}
+	repo, err := repoInformer.GetRepositoryByURL(repoURL)
+	if err != nil {
+		log.WithError(err).Warn("Failed to get Repository CRD by URL")
+		return nil
+	}
+	return repo
+}
+
+// emitRepoConnectionFailedEvent emits an event on the Repository CRD when transitioning from healthy to failed state.
+// Only emits on state transition to avoid noisy events on every failed request.
+// Also updates the Repository's status with the connection state.
+func (m *appStateManager) emitRepoConnectionFailedEvent(repoURL string, err error) {
+	repo := m.findRepositoryByURL(repoURL)
+	if repo == nil {
+		return
+	}
+
+	// Check if we're transitioning from healthy to failed
+	wasHealthy := true
+	if val, loaded := m.repoConnectionHealthy.Load(repoURL); loaded {
+		wasHealthy = val.(bool)
+	}
+
+	// Mark as unhealthy
+	m.repoConnectionHealthy.Store(repoURL, false)
+
+	message := fmt.Sprintf("Failed to connect to repository during manifest generation: %v", err)
+
+	// Update the Repository status
+	m.updateRepoConnectionStatus(repo, v1alpha0.ConnectionStatusFailed, message)
+
+	// Only emit event on state transition (healthy -> failed)
+	if wasHealthy && m.auditLogger != nil {
+		m.auditLogger.LogRepoEvent(repo, argo.EventInfo{
+			Type:   corev1.EventTypeWarning,
+			Reason: argo.EventReasonConnectionFailed,
+		}, message)
+	}
+}
+
+// emitRepoConnectionSuccessEvent emits events on the Repository CRD for successful connections.
+// - ConnectionSuccessful: first successful connection (state was unknown)
+// - ConnectionRecovered: recovery from previous failure (failed -> healthy)
+// Continued success while already healthy emits no event to avoid noise.
+// Also updates the Repository's status with the connection state.
+func (m *appStateManager) emitRepoConnectionSuccessEvent(repoURL string) {
+	repo := m.findRepositoryByURL(repoURL)
+	if repo == nil {
+		return
+	}
+
+	// Check previous state
+	val, loaded := m.repoConnectionHealthy.Load(repoURL)
+	wasHealthy := !loaded || val.(bool) // unknown or explicitly healthy
+
+	// Mark as healthy
+	m.repoConnectionHealthy.Store(repoURL, true)
+
+	// Update the Repository status
+	m.updateRepoConnectionStatus(repo, v1alpha0.ConnectionStatusSuccessful, "Successfully connected to repository")
+
+	// Determine which event to emit based on state transition
+	if !loaded {
+		// First successful connection (state was unknown)
+		if m.auditLogger != nil {
+			m.auditLogger.LogRepoEvent(repo, argo.EventInfo{
+				Type:   corev1.EventTypeNormal,
+				Reason: argo.EventReasonConnectionSuccessful,
+			}, "Successfully connected to repository")
+		}
+	} else if !wasHealthy {
+		// Recovery from previous failure
+		if m.auditLogger != nil {
+			m.auditLogger.LogRepoEvent(repo, argo.EventInfo{
+				Type:   corev1.EventTypeNormal,
+				Reason: argo.EventReasonConnectionRecovered,
+			}, "Repository connection recovered after previous failure")
+		}
+	}
+	// If wasHealthy && loaded, no event (continued success)
+}
+
+// updateRepoConnectionStatus updates the Repository CRD's status with the current connection state.
+// It updates both the per-cluster state (ClusterConnectionStates) and, if this is the main application
+// controller (controllerName == common.ApplicationController), also calculates the aggregate state.
+func (m *appStateManager) updateRepoConnectionStatus(repo *v1alpha0.Repository, connStatus v1alpha0.ConnectionStatus, message string) {
+	if repo == nil {
+		return
+	}
+
+	now := metav1.Now()
+	clusterName := m.controllerName // Use controller name as the cluster/controller identifier
+
+	// Build the updated cluster connection state for this controller
+	newClusterState := v1alpha0.ClusterConnectionState{
+		Name: clusterName,
+		ConnectionState: v1alpha0.ClusterConnectionStateDetail{
+			Status:      connStatus,
+			Message:     message,
+			AttemptedAt: &now,
+		},
+	}
+
+	// Get the current status and update the cluster state
+	updatedClusterStates := make([]v1alpha0.ClusterConnectionState, 0)
+	found := false
+	for _, cs := range repo.Status.ClusterConnectionStates {
+		if cs.Name == clusterName {
+			updatedClusterStates = append(updatedClusterStates, newClusterState)
+			found = true
+		} else {
+			updatedClusterStates = append(updatedClusterStates, cs)
+		}
+	}
+	if !found {
+		updatedClusterStates = append(updatedClusterStates, newClusterState)
+	}
+
+	// Build the patch - always include cluster connection states
+	statusPatch := map[string]any{
+		"clusterConnectionStates": updatedClusterStates,
+	}
+
+	// Only calculate and set aggregate state if this is the main application controller
+	if m.controllerName == common.ApplicationController {
+		aggregateState := calculateAggregateConnectionState(updatedClusterStates, now)
+		statusPatch["connectionState"] = aggregateState
+	}
+
+	// Patch the status
+	patch := map[string]any{
+		"status": statusPatch,
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		log.WithError(err).Warn("Failed to marshal repository status patch")
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"repository":     repo.Name,
+		"namespace":      repo.Namespace,
+		"controllerName": m.controllerName,
+		"status":         connStatus,
+	}).Debug("Patching repository connection status")
+
+	_, err = m.appclientset.ArgoprojV1alpha0().Repositories(repo.Namespace).Patch(
+		context.Background(),
+		repo.Name,
+		types.MergePatchType,
+		patchBytes,
+		metav1.PatchOptions{FieldManager: m.controllerName},
+		"status",
+	)
+	if err != nil {
+		log.WithError(err).WithField("repository", repo.Name).Warn("Failed to update repository connection status")
+	} else {
+		log.WithField("repository", repo.Name).Debug("Successfully patched repository connection status")
+	}
+}
+
+// calculateAggregateConnectionState calculates the aggregate connection state from all cluster states.
+func calculateAggregateConnectionState(clusterStates []v1alpha0.ClusterConnectionState, now metav1.Time) *v1alpha0.AggregateConnectionState {
+	if len(clusterStates) == 0 {
+		return &v1alpha0.AggregateConnectionState{
+			Status:      v1alpha0.ConnectionStatusUnknown,
+			Message:     "No cluster connection states available",
+			AttemptedAt: &now,
+		}
+	}
+
+	var successCount, failCount int32
+	for _, cs := range clusterStates {
+		switch cs.ConnectionState.Status {
+		case v1alpha0.ConnectionStatusSuccessful:
+			successCount++
+		case v1alpha0.ConnectionStatusFailed:
+			failCount++
+		}
+	}
+
+	total := int32(len(clusterStates))
+	var connStatus v1alpha0.ConnectionStatus
+	var message string
+
+	switch {
+	case failCount == 0:
+		connStatus = v1alpha0.ConnectionStatusSuccessful
+		message = "All clusters connected successfully"
+	case successCount == 0:
+		connStatus = v1alpha0.ConnectionStatusFailed
+		message = "All clusters failed to connect"
+	default:
+		connStatus = v1alpha0.ConnectionStatusDegraded
+		message = fmt.Sprintf("%d of %d clusters connected successfully", successCount, total)
+	}
+
+	return &v1alpha0.AggregateConnectionState{
+		Status:             connStatus,
+		Message:            message,
+		AttemptedAt:        &now,
+		TotalClusters:      total,
+		SuccessfulClusters: successCount,
+		FailedClusters:     failCount,
 	}
 }
 

@@ -506,6 +506,7 @@ func GetClusterSharding(kubeClient kubernetes.Interface, settingsMgr *settings.S
 		log.Info("Processing all cluster shards")
 		shardNumber = 0
 	}
-	db := db.NewDB(settingsMgr.GetNamespace(), settingsMgr, kubeClient)
+	// TODO: fix
+	db := db.NewDB(settingsMgr.GetNamespace(), settingsMgr, kubeClient, db.RepositoryBackendModeSecret, nil)
 	return NewClusterSharding(db, shardNumber, replicasCount, shardingAlgorithm), nil
 }

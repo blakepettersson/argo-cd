@@ -36,7 +36,9 @@ import (
 	timeutil "github.com/argoproj/pkg/v2/time"
 
 	"github.com/argoproj/argo-cd/v3/common"
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha0"
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	appclientset "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned"
 	"github.com/argoproj/argo-cd/v3/server/settings/oidc"
 	"github.com/argoproj/argo-cd/v3/util"
 	"github.com/argoproj/argo-cd/v3/util/crypto"
@@ -284,6 +286,19 @@ var (
 			}
 			return nil, nil
 		}
+	}
+
+	// ByRepositoryURLIndexer indexes Repository CRDs by their URL
+	ByRepositoryURLIndexer     = "byRepositoryURL"
+	ByRepositoryURLIndexerFunc = func(obj any) ([]string, error) {
+		repo, ok := obj.(*v1alpha0.Repository)
+		if !ok {
+			return nil, nil
+		}
+		if repo.Spec.URL != "" {
+			return []string{strings.TrimRight(repo.Spec.URL, "/")}, nil
+		}
+		return nil, nil
 	}
 )
 
@@ -572,6 +587,7 @@ var sourceTypeToEnableGenerationKey = map[v1alpha1.ApplicationSourceType]string{
 type SettingsManager struct {
 	ctx             context.Context
 	clientset       kubernetes.Interface
+	appclientset    appclientset.Interface
 	secrets         v1listers.SecretLister
 	secretsInformer cache.SharedIndexInformer
 	configmaps      v1listers.ConfigMapLister
@@ -588,6 +604,8 @@ type SettingsManager struct {
 	tlsCertCacheSecretVersion string
 	// clusterInformer provides optimized cluster lookups using informer transforms
 	clusterInformer *ClusterInformer
+	// repositoryInformer provides optimized Repository CRD lookups
+	repositoryInformer *RepositoryInformer
 }
 
 type incompleteSettingsError struct {
@@ -664,6 +682,14 @@ func (mgr *SettingsManager) GetClusterInformer() *ClusterInformer {
 	// Ensure the settings manager is initialized
 	_ = mgr.ensureSynced(false)
 	return mgr.clusterInformer
+}
+
+// GetRepositoryInformer returns the repository informer for optimized Repository CRD lookups.
+// Returns nil if appclientset was not provided via WithAppClientset option.
+func (mgr *SettingsManager) GetRepositoryInformer() *RepositoryInformer {
+	// Ensure the settings manager is initialized
+	_ = mgr.ensureSynced(false)
+	return mgr.repositoryInformer
 }
 
 func (mgr *SettingsManager) updateSecret(callback func(*corev1.Secret) error) error {
@@ -1358,6 +1384,15 @@ func (mgr *SettingsManager) initialize(ctx context.Context) error {
 		log.Error(err)
 	}
 
+	// Create repository informer if appclientset is provided
+	var repositoryInformer *RepositoryInformer
+	if mgr.appclientset != nil {
+		repositoryInformer, err = NewRepositoryInformer(mgr.appclientset, mgr.namespace)
+		if err != nil {
+			log.Error(err)
+		}
+	}
+
 	_, err = cmInformer.AddEventHandler(eventHandler)
 	if err != nil {
 		log.Error(err)
@@ -1388,13 +1423,31 @@ func (mgr *SettingsManager) initialize(ctx context.Context) error {
 		log.Info("cluster secrets informer cancelled")
 	}()
 
-	if !cache.WaitForCacheSync(ctx.Done(), cmInformer.HasSynced, secretsInformer.HasSynced, clusterInformer.HasSynced) {
+	// Start repository informer if available
+	if repositoryInformer != nil {
+		go func() {
+			repositoryInformer.Run(ctx.Done())
+			log.Info("repository informer cancelled")
+		}()
+	}
+
+	// Wait for cache sync - include repositoryInformer if available
+	cacheSyncFuncs := []cache.InformerSynced{cmInformer.HasSynced, secretsInformer.HasSynced, clusterInformer.HasSynced}
+	if repositoryInformer != nil {
+		cacheSyncFuncs = append(cacheSyncFuncs, repositoryInformer.HasSynced)
+	}
+	if !cache.WaitForCacheSync(ctx.Done(), cacheSyncFuncs...) {
 		return errors.New("timed out waiting for settings cache to sync")
 	}
 	log.Info("Configmap/secret informer synced")
 
 	mgr.clusterInformer = clusterInformer
 	log.Info("Cluster cache informer synced")
+
+	if repositoryInformer != nil {
+		mgr.repositoryInformer = repositoryInformer
+		log.Info("Repository informer synced")
+	}
 
 	tryNotify := func() {
 		newSettings, err := mgr.GetSettings()
@@ -1723,6 +1776,13 @@ type SettingsManagerOpts func(mgs *SettingsManager)
 func WithRepoOrClusterChangedHandler(handler func()) SettingsManagerOpts {
 	return func(mgr *SettingsManager) {
 		mgr.reposOrClusterChanged = handler
+	}
+}
+
+// WithAppClientset sets the ArgoCD application clientset for Repository CRD informer
+func WithAppClientset(appclientset appclientset.Interface) SettingsManagerOpts {
+	return func(mgr *SettingsManager) {
+		mgr.appclientset = appclientset
 	}
 }
 

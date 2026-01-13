@@ -9438,7 +9438,7 @@
     },
     "v1alpha1RepoCreds": {
       "type": "object",
-      "title": "RepoCreds holds the definition for repository credentials",
+      "title": "RepoCreds holds the definition for repository credentials\n+kubebuilder:skipversion",
       "properties": {
         "bearerToken": {
           "type": "string",
@@ -9537,7 +9537,7 @@
     },
     "v1alpha1Repository": {
       "type": "object",
-      "title": "Repository is a repository holding application configurations",
+      "title": "Repository is a repository holding application configurations\n+kubebuilder:skipversion",
       "properties": {
         "bearerToken": {
           "type": "string",

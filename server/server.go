@@ -357,7 +357,17 @@ func NewServer(ctx context.Context, opts ArgoCDServerOpts, appsetOpts Applicatio
 
 	apiFactory := api.NewFactory(settings_notif.GetFactorySettings(argocdService, "argocd-notifications-secret", "argocd-notifications-cm", false), opts.Namespace, secretInformer, configMapInformer)
 
-	dbInstance := db.NewDB(opts.Namespace, settingsMgr, opts.KubeClientset)
+	// Initialize database with CRD backend if enabled
+	var dbInstance db.ArgoDB
+	// TODO: change to secrets default
+	repositoryBackend := db.RepositoryBackendMode(env.StringFromEnv("ARGOCD_REPOSITORY_BACKEND", string(db.RepositoryBackendModeCRD)))
+	if repositoryBackend == db.RepositoryBackendModeCRD || repositoryBackend == db.RepositoryBackendModeHybrid {
+		log.Info("API Server: Using CRD backend for repository storage")
+		dbInstance = db.NewDB(opts.Namespace, settingsMgr, opts.KubeClientset, repositoryBackend, opts.AppClientset)
+	} else {
+		log.Info("API Server: Using Secrets backend for repository storage")
+		dbInstance = db.NewDB(opts.Namespace, settingsMgr, opts.KubeClientset, db.RepositoryBackendModeSecret, nil)
+	}
 	logger := log.NewEntry(log.StandardLogger())
 
 	sg := extension.NewDefaultSettingsGetter(settingsMgr)
@@ -417,7 +427,7 @@ func (server *ArgoCDServer) healthCheck(r *http.Request) error {
 		return errors.New("API Server is not available: it either hasn't started or is restarting")
 	}
 	if val, ok := r.URL.Query()["full"]; ok && len(val) > 0 && val[0] == "true" {
-		argoDB := db.NewDB(server.Namespace, server.settingsMgr, server.KubeClientset)
+		argoDB := db.NewDB(server.Namespace, server.settingsMgr, server.KubeClientset, db.RepositoryBackendModeSecret, nil)
 		_, err := argoDB.ListClusters(r.Context())
 		if err != nil && strings.Contains(err.Error(), notObjectErrMsg) {
 			return err
@@ -1248,8 +1258,8 @@ func (server *ArgoCDServer) newHTTPServer(ctx context.Context, port int, grpcWeb
 	server.registerDexHandlers(mux)
 
 	// Webhook handler for git events (Note: cache timeouts are hardcoded because API server does not write to cache and not really using them)
-	argoDB := db.NewDB(server.Namespace, server.settingsMgr, server.KubeClientset)
-	acdWebhookHandler := webhook.NewHandler(server.Namespace, server.ApplicationNamespaces, server.WebhookParallelism, server.AppClientset, server.appLister, server.settings, server.settingsMgr, server.RepoServerCache, server.Cache, argoDB, server.settingsMgr.GetMaxWebhookPayloadSize())
+	// Use the same database instance as the rest of the server
+	acdWebhookHandler := webhook.NewHandler(server.Namespace, server.ApplicationNamespaces, server.WebhookParallelism, server.AppClientset, server.appLister, server.settings, server.settingsMgr, server.RepoServerCache, server.Cache, server.db, server.settingsMgr.GetMaxWebhookPayloadSize())
 
 	mux.HandleFunc("/api/webhook", acdWebhookHandler.Handler)
 

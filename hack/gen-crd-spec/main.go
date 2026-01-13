@@ -18,9 +18,11 @@ import (
 )
 
 var kindToCRDPath = map[string]string{
-	application.ApplicationFullName:    "manifests/crds/application-crd.yaml",
-	application.AppProjectFullName:     "manifests/crds/appproject-crd.yaml",
-	application.ApplicationSetFullName: "manifests/crds/applicationset-crd.yaml",
+	application.ApplicationFullName:            "manifests/crds/application-crd.yaml",
+	application.AppProjectFullName:             "manifests/crds/appproject-crd.yaml",
+	application.ApplicationSetFullName:         "manifests/crds/applicationset-crd.yaml",
+	application.RepositoryFullName:             "manifests/crds/repository-crd.yaml",
+	application.RepositoryCredentialsFullName:  "manifests/crds/repositorycredentials-crd.yaml",
 }
 
 func getCustomResourceDefinitions(ctx context.Context) map[string]*apiextensionsv1.CustomResourceDefinition {
@@ -38,6 +40,8 @@ func getCustomResourceDefinitions(ctx context.Context) map[string]*apiextensions
 	deleteFile("config/argoproj.io_applications.yaml")
 	deleteFile("config/argoproj.io_appprojects.yaml")
 	deleteFile("config/argoproj.io_applicationsets.yaml")
+	deleteFile("config/argoproj.io_repositories.yaml")
+	deleteFile("config/argoproj.io_repositorycredentials.yaml")
 	deleteFile("config")
 
 	objs, err := kube.SplitYAML(crdYamlBytes)

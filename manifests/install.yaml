@@ -30543,6 +30543,480 @@ spec:
     served: true
     storage: true
 ---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    app.kubernetes.io/name: repositories.argoproj.io
+    app.kubernetes.io/part-of: argocd
+  name: repositories.argoproj.io
+spec:
+  group: argoproj.io
+  names:
+    kind: Repository
+    listKind: RepositoryList
+    plural: repositories
+    shortNames:
+    - repo
+    - repos
+    singular: repository
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.url
+      name: URL
+      type: string
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    - jsonPath: .status.connectionState.status
+      name: Status
+      type: string
+    - jsonPath: .status.connectionState.message
+      name: Message
+      priority: 1
+      type: string
+    - jsonPath: .status.connectionState.attemptedAt
+      name: Last Attempt
+      priority: 1
+      type: date
+    - jsonPath: .spec.project
+      name: Project
+      priority: 10
+      type: string
+    name: v1alpha0
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Repository is a repository holding application configurations (CRD representation)
+          Note: This is the CRD type with kubebuilder markers and nested spec structure.
+          The internal Repository type (flat structure) is in ../repository_types.go
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: RepositorySpec defines the desired state of a Repository
+            properties:
+              forceHttpBasicAuth:
+                description: ForceHttpBasicAuth forces basic authentication for HTTP
+                  connections
+                type: boolean
+              git:
+                description: Git contains Git-specific repository configuration
+                properties:
+                  depth:
+                    description: Depth specifies the depth for shallow clones. A value
+                      of 0 indicates a full clone.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  enableLFS:
+                    description: EnableLFS enables Git LFS support for this repository
+                    type: boolean
+                  githubAppEnterpriseBaseUrl:
+                    description: GithubAppEnterpriseBaseURL specifies the base URL
+                      of GitHub Enterprise installation. If empty will default to
+                      https://api.github.com
+                    type: string
+                  githubAppID:
+                    description: GithubAppId specifies the ID of the GitHub app used
+                      to access the repo
+                    format: int64
+                    type: integer
+                  githubAppInstallationID:
+                    description: GithubAppInstallationId specifies the installation
+                      ID of the GitHub App used to access the repo
+                    format: int64
+                    type: integer
+                type: object
+              helm:
+                description: Helm contains Helm-specific repository configuration
+                properties:
+                  enableOCI:
+                    description: EnableOCI enables OCI support for Helm charts
+                    type: boolean
+                  name:
+                    description: Name is the name of the Helm repository
+                    type: string
+                type: object
+              insecure:
+                description: Insecure specifies whether to skip TLS certificate or
+                  SSH host key verification
+                type: boolean
+              noProxy:
+                description: NoProxy specifies a comma-separated list of hosts that
+                  should not use the proxy
+                type: string
+              oci:
+                description: OCI contains OCI-specific repository configuration
+                properties:
+                  insecureSkipTLS:
+                    description: InsecureSkipTLS skips TLS verification entirely (forces
+                      HTTP instead of HTTPS)
+                    type: boolean
+                type: object
+              project:
+                description: Project is the ArgoCD project that this repository belongs
+                  to
+                type: string
+              proxy:
+                description: Proxy specifies the HTTP/HTTPS proxy URL for this repository
+                type: string
+              secretRef:
+                description: SecretRef is a reference to a Secret containing credentials
+                  for this repository
+                properties:
+                  name:
+                    description: Name is the name of the secret
+                    type: string
+                required:
+                - name
+                type: object
+              type:
+                default: git
+                description: Type specifies the type of the repository. Can be "git",
+                  "helm", or "oci".
+                enum:
+                - git
+                - helm
+                - oci
+                type: string
+              url:
+                description: URL is the URL to the repository
+                type: string
+            required:
+            - url
+            type: object
+            x-kubernetes-validations:
+            - message: git configuration can only be set when type is 'git'
+              rule: '!has(self.git) || !has(self.type) || self.type == ''git'''
+            - message: helm configuration can only be set when type is 'helm'
+              rule: '!has(self.helm) || !has(self.type) || self.type == ''helm'''
+            - message: oci configuration can only be set when type is 'oci'
+              rule: '!has(self.oci) || !has(self.type) || self.type == ''oci'''
+          status:
+            description: RepositoryStatus defines the observed state of a Repository
+            properties:
+              clusterConnectionStates:
+                description: |-
+                  ClusterConnectionStates contains per-cluster connection states.
+                  Each controlplane manages its own entry using its name as the field manager.
+                items:
+                  description: ClusterConnectionState represents the connection state
+                    for a specific cluster/controlplane
+                  properties:
+                    connectionState:
+                      description: ConnectionState is the connection state for this
+                        cluster
+                      properties:
+                        attemptedAt:
+                          description: AttemptedAt is the timestamp of the last connection
+                            attempt
+                          format: date-time
+                          type: string
+                        message:
+                          description: Message contains details about the connection
+                            status
+                          type: string
+                        status:
+                          description: Status is the connection status
+                          enum:
+                          - Successful
+                          - Failed
+                          - Unknown
+                          type: string
+                      required:
+                      - status
+                      type: object
+                    name:
+                      description: Name is the name of the cluster or controlplane
+                        (e.g., "argocd-application-controller")
+                      type: string
+                  required:
+                  - connectionState
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              conditions:
+                description: Conditions represents the latest available observations
+                  of the repository's state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              connectionState:
+                description: ConnectionState contains the aggregate connection state
+                  across all clusters
+                properties:
+                  attemptedAt:
+                    description: AttemptedAt is the timestamp of the last connection
+                      attempt
+                    format: date-time
+                    type: string
+                  failedClusters:
+                    description: FailedClusters is the number of clusters that failed
+                      to connect
+                    format: int32
+                    type: integer
+                  message:
+                    description: Message contains human-readable information about
+                      the connection status
+                    type: string
+                  status:
+                    description: Status is the connection status (Successful, Failed,
+                      Degraded, Unknown)
+                    enum:
+                    - Successful
+                    - Failed
+                    - Degraded
+                    - Unknown
+                    type: string
+                  successfulClusters:
+                    description: SuccessfulClusters is the number of clusters that
+                      successfully connected
+                    format: int32
+                    type: integer
+                  totalClusters:
+                    description: TotalClusters is the total number of clusters managing
+                      this repository
+                    format: int32
+                    type: integer
+                required:
+                - status
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    app.kubernetes.io/name: repositorycredentials.argoproj.io
+    app.kubernetes.io/part-of: argocd
+  name: repositorycredentials.argoproj.io
+spec:
+  group: argoproj.io
+  names:
+    kind: RepositoryCredential
+    listKind: RepositoryCredentialList
+    plural: repositorycredentials
+    shortNames:
+    - repocreds
+    singular: repositorycredential
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.url
+      name: URL Pattern
+      type: string
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    name: v1alpha0
+    schema:
+      openAPIV3Schema:
+        description: RepositoryCredential holds repository credential templates (CRD
+          representation)
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: RepositoryCredentialSpec defines the desired state of RepositoryCredential
+            properties:
+              forceHttpBasicAuth:
+                description: ForceHttpBasicAuth forces basic authentication for HTTP
+                  connections
+                type: boolean
+              git:
+                description: Git contains Git-specific repository configuration
+                properties:
+                  depth:
+                    description: Depth specifies the depth for shallow clones. A value
+                      of 0 indicates a full clone.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  enableLFS:
+                    description: EnableLFS enables Git LFS support for this repository
+                    type: boolean
+                  githubAppEnterpriseBaseUrl:
+                    description: GithubAppEnterpriseBaseURL specifies the base URL
+                      of GitHub Enterprise installation. If empty will default to
+                      https://api.github.com
+                    type: string
+                  githubAppID:
+                    description: GithubAppId specifies the ID of the GitHub app used
+                      to access the repo
+                    format: int64
+                    type: integer
+                  githubAppInstallationID:
+                    description: GithubAppInstallationId specifies the installation
+                      ID of the GitHub App used to access the repo
+                    format: int64
+                    type: integer
+                type: object
+              helm:
+                description: Helm contains Helm-specific repository configuration
+                properties:
+                  enableOCI:
+                    description: EnableOCI enables OCI support for Helm charts
+                    type: boolean
+                  name:
+                    description: Name is the name of the Helm repository
+                    type: string
+                type: object
+              insecure:
+                description: Insecure specifies whether to skip TLS certificate or
+                  SSH host key verification
+                type: boolean
+              noProxy:
+                description: NoProxy specifies a comma-separated list of hosts that
+                  should not use the proxy
+                type: string
+              oci:
+                description: OCI contains OCI-specific repository configuration
+                properties:
+                  insecureSkipTLS:
+                    description: InsecureSkipTLS skips TLS verification entirely (forces
+                      HTTP instead of HTTPS)
+                    type: boolean
+                type: object
+              proxy:
+                description: Proxy specifies the HTTP/HTTPS proxy URL for this repository
+                type: string
+              secretRef:
+                description: SecretRef is a reference to a Secret containing credentials
+                properties:
+                  name:
+                    description: Name is the name of the secret
+                    type: string
+                required:
+                - name
+                type: object
+              type:
+                default: git
+                description: Type specifies the type of the repository credentials.
+                  Can be "git", "helm", or "oci".
+                enum:
+                - git
+                - helm
+                - oci
+                type: string
+              url:
+                description: URL is the URL pattern that these credentials match
+                type: string
+            required:
+            - url
+            type: object
+            x-kubernetes-validations:
+            - message: git configuration can only be set when type is 'git'
+              rule: '!has(self.git) || !has(self.type) || self.type == ''git'''
+            - message: helm configuration can only be set when type is 'helm'
+              rule: '!has(self.helm) || !has(self.type) || self.type == ''helm'''
+            - message: oci configuration can only be set when type is 'oci'
+              rule: '!has(self.oci) || !has(self.type) || self.type == ''oci'''
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -30638,6 +31112,25 @@ rules:
   - update
   - patch
   - delete
+- apiGroups:
+  - argoproj.io
+  resources:
+  - repositories
+  - repositorycredentials
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - repositories/status
+  - repositorycredentials/status
+  verbs:
+  - update
+  - patch
 - apiGroups:
   - ""
   resources:

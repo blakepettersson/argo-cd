@@ -368,7 +368,8 @@ func reconcileApplications(
 	ignoreNormalizerOpts normalizers.IgnoreNormalizerOpts,
 ) ([]appReconcileResult, error) {
 	settingsMgr := settings.NewSettingsManager(ctx, kubeClientset, namespace)
-	argoDB := db.NewDB(namespace, settingsMgr, kubeClientset)
+	// TODO: fix
+	argoDB := db.NewDB(namespace, settingsMgr, kubeClientset, db.RepositoryBackendModeSecret, nil)
 	appInformerFactory := appinformers.NewSharedInformerFactoryWithOptions(
 		appClientset,
 		1*time.Hour,
@@ -409,6 +410,7 @@ func reconcileApplications(
 		appClientset,
 		repoServerClient,
 		namespace,
+		"", // controllerName - not used in admin commands
 		kubeutil.NewKubectl(),
 		func(_ string) (kube.CleanupFunc, error) {
 			return func() {}, nil
@@ -423,6 +425,7 @@ func reconcileApplications(
 		0,
 		serverSideDiff,
 		ignoreNormalizerOpts,
+		nil, // auditLogger - not used in admin commands
 	)
 
 	appsList, err := appClientset.ArgoprojV1alpha1().Applications(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})

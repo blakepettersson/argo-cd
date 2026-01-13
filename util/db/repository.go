@@ -35,6 +35,47 @@ const (
 	sshPrivateKey = "sshPrivateKey"
 )
 
+// RepositoryBackendMode defines the backend storage mode for repositories
+type RepositoryBackendMode string
+
+const (
+	// RepositoryBackendModeCRD uses Kubernetes CRDs for repository storage
+	RepositoryBackendModeCRD RepositoryBackendMode = "crd"
+	// RepositoryBackendModeHybrid uses both CRDs and Secrets for repository storage
+	RepositoryBackendModeHybrid RepositoryBackendMode = "hybrid"
+	// RepositoryBackendModeSecret uses Kubernetes Secrets for repository storage
+	RepositoryBackendModeSecret RepositoryBackendMode = "secret"
+)
+
+// validRepositoryBackendModes contains all valid backend modes for validation
+var validRepositoryBackendModes = []RepositoryBackendMode{
+	RepositoryBackendModeCRD,
+	RepositoryBackendModeHybrid,
+	RepositoryBackendModeSecret,
+}
+
+// String implements pflag.Value interface
+func (m *RepositoryBackendMode) String() string {
+	return string(*m)
+}
+
+// Set implements pflag.Value interface with validation
+func (m *RepositoryBackendMode) Set(value string) error {
+	mode := RepositoryBackendMode(value)
+	for _, valid := range validRepositoryBackendModes {
+		if mode == valid {
+			*m = mode
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid repository backend mode %q: must be one of [crd, hybrid, secret]", value)
+}
+
+// Type implements pflag.Value interface
+func (m *RepositoryBackendMode) Type() string {
+	return "string"
+}
+
 // repositoryBackend defines the API for types that wish to provide interaction with repository storage
 type repositoryBackend interface {
 	CreateRepository(ctx context.Context, r *v1alpha1.Repository) (*v1alpha1.Repository, error)
@@ -425,10 +466,34 @@ func (db *db) enrichCredsToRepos(ctx context.Context, repositories []*v1alpha1.R
 }
 
 func (db *db) repoBackend() repositoryBackend {
+	if db.appclientset != nil {
+		if db.repositoryBackendMode == RepositoryBackendModeHybrid {
+			return newHybridRepositoryBackend(db, db.appclientset, false)
+		}
+
+		return &crdRepositoryBackend{
+			db:         db,
+			appclient:  db.appclientset,
+			writeCreds: false,
+		}
+	}
+	// Fall back to secrets backend for backward compatibility
 	return &secretsRepositoryBackend{db: db}
 }
 
 func (db *db) repoWriteBackend() repositoryBackend {
+	if db.appclientset != nil {
+		if db.repositoryBackendMode == RepositoryBackendModeHybrid {
+			return newHybridRepositoryBackend(db, db.appclientset, true)
+		}
+
+		return &crdRepositoryBackend{
+			db:         db,
+			appclient:  db.appclientset,
+			writeCreds: true,
+		}
+	}
+	// Fall back to secrets backend for backward compatibility
 	return &secretsRepositoryBackend{db: db, writeCreds: true}
 }
 

@@ -20,6 +20,7 @@ import (
 )
 
 // RepoCreds holds the definition for repository credentials
+// +kubebuilder:skipversion
 type RepoCreds struct {
 	// URL is the URL to which these credentials match
 	URL string `json:"url" protobuf:"bytes,1,opt,name=url"`
@@ -62,6 +63,7 @@ type RepoCreds struct {
 }
 
 // Repository is a repository holding application configurations
+// +kubebuilder:skipversion
 type Repository struct {
 	// Repo contains the URL to the remote repository
 	Repo string `json:"repo" protobuf:"bytes,1,opt,name=repo"`

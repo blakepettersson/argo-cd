@@ -5,3 +5,5 @@ resources:
 - application-crd.yaml
 - appproject-crd.yaml
 - applicationset-crd.yaml
+- repository-crd.yaml
+- repositorycredentials-crd.yaml

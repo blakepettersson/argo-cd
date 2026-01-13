@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/argoproj/argo-cd/v3/util/db"
 	"github.com/argoproj/pkg/v2/stats"
 	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
@@ -25,6 +26,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/controller/sharding"
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	appclientset "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned"
+	appinformers "github.com/argoproj/argo-cd/v3/pkg/client/informers/externalversions"
 	"github.com/argoproj/argo-cd/v3/pkg/ratelimiter"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/v3/util/argo"
@@ -75,8 +77,8 @@ func NewCommand() *cobra.Command {
 		glogLevel                        int
 		metricsPort                      int
 		metricsCacheExpiration           time.Duration
-		metricsAplicationLabels          []string
-		metricsAplicationConditions      []string
+		metricsApplicationLabels         []string
+		metricsApplicationConditions     []string
 		metricsClusterLabels             []string
 		kubectlParallelismLimit          int64
 		cacheSource                      func() (*appstatecache.Cache, error)
@@ -97,6 +99,12 @@ func NewCommand() *cobra.Command {
 		// argocd k8s event logging flag
 		enableK8sEvent  []string
 		hydratorEnabled bool
+
+		// repository controller flags
+		repositoryBackendMode      db.RepositoryBackendMode
+		repoControllerWorkers      int
+		repoControllerTestInterval time.Duration
+		repoControllerTestTimeout  time.Duration
 	)
 	command := cobra.Command{
 		Use:               cliName,
@@ -174,9 +182,12 @@ func NewCommand() *cobra.Command {
 
 			var appController *controller.ApplicationController
 
-			settingsMgr := settings.NewSettingsManager(ctx, kubeClient, namespace, settings.WithRepoOrClusterChangedHandler(func() {
-				appController.InvalidateProjectsCache()
-			}))
+			settingsMgr := settings.NewSettingsManager(ctx, kubeClient, namespace,
+				settings.WithRepoOrClusterChangedHandler(func() {
+					appController.InvalidateProjectsCache()
+				}),
+				settings.WithAppClientset(appClient),
+			)
 			kubectl := kubeutil.NewKubectl()
 			clusterSharding, err := sharding.GetClusterSharding(kubeClient, settingsMgr, shardingAlgorithm, enableDynamicClusterDistribution)
 			errors.CheckError(err)
@@ -206,8 +217,8 @@ func NewCommand() *cobra.Command {
 				time.Duration(repoErrorGracePeriod)*time.Second,
 				metricsPort,
 				metricsCacheExpiration,
-				metricsAplicationLabels,
-				metricsAplicationConditions,
+				metricsApplicationLabels,
+				metricsApplicationConditions,
 				metricsClusterLabels,
 				kubectlParallelismLimit,
 				persistResourceHealth,
@@ -219,6 +230,7 @@ func NewCommand() *cobra.Command {
 				ignoreNormalizerOpts,
 				enableK8sEvent,
 				hydratorEnabled,
+				repositoryBackendMode,
 			)
 			errors.CheckError(err)
 			cacheutil.CollectMetrics(redisClient, appController.GetMetricsServer(), nil)
@@ -245,6 +257,42 @@ func NewCommand() *cobra.Command {
 			}()
 
 			go appController.Run(ctx, statusProcessors, operationProcessors)
+
+			enableRepositoryController := repositoryBackendMode == db.RepositoryBackendModeHybrid || repositoryBackendMode == db.RepositoryBackendModeCRD
+			// Start Repository controller if enabled
+			if enableRepositoryController {
+				log.Info("Repository controller is enabled, starting...")
+
+				// Create informer factory for v1alpha0 resources
+				informerFactory := appinformers.NewSharedInformerFactory(appClient, resyncDuration)
+				repoInformer := informerFactory.Argoproj().V1alpha0().Repositories()
+
+				// Start the informer factory
+				informerFactory.Start(ctx.Done())
+
+				// Create audit logger for the repository controller
+				repoAuditLogger := argo.NewAuditLogger(kubeClient, common.ApplicationController, enableK8sEvent)
+
+				// Create Repository controller
+				repoController := controller.NewRepositoryController(
+					namespace,
+					"", // controlplaneName - empty string defaults to "argocd-application-controller"
+					appClient,
+					kubeClient,
+					repoClientset,
+					repoInformer,
+					repoAuditLogger,
+					repoControllerTestInterval,
+					repoControllerTestTimeout,
+				)
+
+				// Start the repository controller
+				go func() {
+					if err := repoController.Run(ctx, repoControllerWorkers); err != nil {
+						log.Fatalf("Error running repository controller: %v", err)
+					}
+				}()
+			}
 
 			<-ctx.Done()
 
@@ -279,8 +327,8 @@ func NewCommand() *cobra.Command {
 	command.Flags().Int64Var(&kubectlParallelismLimit, "kubectl-parallelism-limit", env.ParseInt64FromEnv("ARGOCD_APPLICATION_CONTROLLER_KUBECTL_PARALLELISM_LIMIT", 20, 0, math.MaxInt64), "Number of allowed concurrent kubectl fork/execs. Any value less than 1 means no limit.")
 	command.Flags().BoolVar(&repoServerPlaintext, "repo-server-plaintext", env.ParseBoolFromEnv("ARGOCD_APPLICATION_CONTROLLER_REPO_SERVER_PLAINTEXT", false), "Disable TLS on connections to repo server")
 	command.Flags().BoolVar(&repoServerStrictTLS, "repo-server-strict-tls", env.ParseBoolFromEnv("ARGOCD_APPLICATION_CONTROLLER_REPO_SERVER_STRICT_TLS", false), "Whether to use strict validation of the TLS cert presented by the repo server")
-	command.Flags().StringSliceVar(&metricsAplicationLabels, "metrics-application-labels", []string{}, "List of Application labels that will be added to the argocd_application_labels metric")
-	command.Flags().StringSliceVar(&metricsAplicationConditions, "metrics-application-conditions", []string{}, "List of Application conditions that will be added to the argocd_application_conditions metric")
+	command.Flags().StringSliceVar(&metricsApplicationLabels, "metrics-application-labels", []string{}, "List of Application labels that will be added to the argocd_application_labels metric")
+	command.Flags().StringSliceVar(&metricsApplicationConditions, "metrics-application-conditions", []string{}, "List of Application conditions that will be added to the argocd_application_conditions metric")
 	command.Flags().StringSliceVar(&metricsClusterLabels, "metrics-cluster-labels", []string{}, "List of Cluster labels that will be added to the argocd_cluster_labels metric")
 	command.Flags().StringVar(&otlpAddress, "otlp-address", env.StringFromEnv("ARGOCD_APPLICATION_CONTROLLER_OTLP_ADDRESS", ""), "OpenTelemetry collector address to send traces to")
 	command.Flags().BoolVar(&otlpInsecure, "otlp-insecure", env.ParseBoolFromEnv("ARGOCD_APPLICATION_CONTROLLER_OTLP_INSECURE", true), "OpenTelemetry collector insecure mode")
@@ -304,10 +352,16 @@ func NewCommand() *cobra.Command {
 	// argocd k8s event logging flag
 	command.Flags().StringSliceVar(&enableK8sEvent, "enable-k8s-event", env.StringsFromEnv("ARGOCD_ENABLE_K8S_EVENT", argo.DefaultEnableEventList(), ","), "Enable ArgoCD to use k8s event. For disabling all events, set the value as `none`. (e.g --enable-k8s-event=none), For enabling specific events, set the value as `event reason`. (e.g --enable-k8s-event=StatusRefreshed,ResourceCreated)")
 	command.Flags().BoolVar(&hydratorEnabled, "hydrator-enabled", env.ParseBoolFromEnv("ARGOCD_HYDRATOR_ENABLED", false), "Feature flag to enable Hydrator. Default (\"false\")")
+	// repository controller flags
+	command.Flags().IntVar(&repoControllerWorkers, "repo-controller-workers", env.ParseNumFromEnv("ARGOCD_REPO_CONTROLLER_WORKERS", 2, 1, math.MaxInt32), "Number of repository controller workers")
+	command.Flags().DurationVar(&repoControllerTestInterval, "repo-controller-test-interval", env.ParseDurationFromEnv("ARGOCD_REPO_CONTROLLER_TEST_INTERVAL", 3*time.Minute, 0, math.MaxInt64), "Interval between repository connection tests")
+	command.Flags().DurationVar(&repoControllerTestTimeout, "repo-controller-test-timeout", env.ParseDurationFromEnv("ARGOCD_REPO_CONTROLLER_TEST_TIMEOUT", 30*time.Second, 0, math.MaxInt64), "Timeout for repository connection tests")
 	cacheSource = appstatecache.AddCacheFlagsToCmd(&command, cacheutil.Options{
 		OnClientCreated: func(client *redis.Client) {
 			redisClient = client
 		},
 	})
+	repositoryBackendMode = db.RepositoryBackendMode(env.StringFromEnv("ARGOCD_REPOSITORY_BACKEND", string(db.RepositoryBackendModeHybrid)))
+	command.Flags().Var(&repositoryBackendMode, "repository-backend-mode", "Set the repository backend mode (crd, hybrid, secret)")
 	return &command
 }

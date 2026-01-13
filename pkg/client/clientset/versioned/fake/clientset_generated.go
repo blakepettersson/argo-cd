@@ -4,6 +4,8 @@ package fake
 
 import (
 	clientset "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned"
+	argoprojv1alpha0 "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned/typed/application/v1alpha0"
+	fakeargoprojv1alpha0 "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned/typed/application/v1alpha0/fake"
 	argoprojv1alpha1 "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned/typed/application/v1alpha1"
 	fakeargoprojv1alpha1 "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned/typed/application/v1alpha1/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -71,6 +73,11 @@ var (
 	_ clientset.Interface = &Clientset{}
 	_ testing.FakeClient  = &Clientset{}
 )
+
+// ArgoprojV1alpha0 retrieves the ArgoprojV1alpha0Client
+func (c *Clientset) ArgoprojV1alpha0() argoprojv1alpha0.ArgoprojV1alpha0Interface {
+	return &fakeargoprojv1alpha0.FakeArgoprojV1alpha0{Fake: &c.Fake}
+}
 
 // ArgoprojV1alpha1 retrieves the ArgoprojV1alpha1Client
 func (c *Clientset) ArgoprojV1alpha1() argoprojv1alpha1.ArgoprojV1alpha1Interface {

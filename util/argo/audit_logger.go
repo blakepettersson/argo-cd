@@ -13,7 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application"
-
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha0"
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 )
 
@@ -43,6 +43,17 @@ const (
 	EventReasonResourceActionRan  = "ResourceActionRan"
 	EventReasonOperationStarted   = "OperationStarted"
 	EventReasonOperationCompleted = "OperationCompleted"
+
+	// Repository event reasons (mirrors v1alpha0.EventReason* constants)
+	EventReasonRepositoryCreated    = "RepositoryCreated"
+	EventReasonRepositoryUpdated    = "RepositoryUpdated"
+	EventReasonConnectionSuccessful = "ConnectionSuccessful"
+	EventReasonConnectionFailed     = "ConnectionFailed"
+	EventReasonConnectionRecovered  = "ConnectionRecovered"
+	EventReasonCredentialsValid     = "CredentialsValid"
+	EventReasonCredentialsInvalid   = "CredentialsInvalid"
+	EventReasonCredentialsUpdated   = "CredentialsUpdated"
+	EventReasonCredentialsMissing   = "CredentialsMissing"
 )
 
 func (l *AuditLogger) logEvent(objMeta ObjectRef, gvk schema.GroupVersionKind, info EventInfo, message string, logFields map[string]string, eventLabels map[string]string) {
@@ -176,6 +187,27 @@ func (l *AuditLogger) LogAppProjEvent(proj *v1alpha1.AppProject, info EventInfo,
 		fields["user"] = user
 	}
 	l.logEvent(objectMeta, v1alpha1.AppProjectSchemaGroupVersionKind, info, message, nil, nil)
+}
+
+// LogRepoEvent logs a Kubernetes event for a Repository CRD
+func (l *AuditLogger) LogRepoEvent(repo *v1alpha0.Repository, info EventInfo, message string) {
+	if !l.enableK8SEventLog(info) {
+		return
+	}
+
+	objectMeta := ObjectRef{
+		Name:            repo.Name,
+		Namespace:       repo.Namespace,
+		ResourceVersion: repo.ResourceVersion,
+		UID:             repo.UID,
+	}
+	fields := map[string]string{
+		"repo-url": repo.Spec.URL,
+	}
+	if repo.Spec.Project != "" {
+		fields["project"] = repo.Spec.Project
+	}
+	l.logEvent(objectMeta, v1alpha0.RepositorySchemaGroupVersionKind, info, message, fields, nil)
 }
 
 func NewAuditLogger(kIf kubernetes.Interface, component string, enableK8sEvent []string) *AuditLogger {

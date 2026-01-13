@@ -3,12 +3,15 @@
 package application
 
 import (
+	v1alpha0 "github.com/argoproj/argo-cd/v3/pkg/client/informers/externalversions/application/v1alpha0"
 	v1alpha1 "github.com/argoproj/argo-cd/v3/pkg/client/informers/externalversions/application/v1alpha1"
 	internalinterfaces "github.com/argoproj/argo-cd/v3/pkg/client/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to each of this group's versions.
 type Interface interface {
+	// V1alpha0 provides access to shared informers for resources in V1alpha0.
+	V1alpha0() v1alpha0.Interface
 	// V1alpha1 provides access to shared informers for resources in V1alpha1.
 	V1alpha1() v1alpha1.Interface
 }
@@ -22,6 +25,11 @@ type group struct {
 // New returns a new Interface.
 func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) Interface {
 	return &group{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
+}
+
+// V1alpha0 returns a new v1alpha0.Interface.
+func (g *group) V1alpha0() v1alpha0.Interface {
+	return v1alpha0.New(g.factory, g.namespace, g.tweakListOptions)
 }
 
 // V1alpha1 returns a new v1alpha1.Interface.

@@ -180,9 +180,21 @@ func NewApplicationController(
 	ignoreNormalizerOpts normalizers.IgnoreNormalizerOpts,
 	enableK8sEvent []string,
 	hydratorEnabled bool,
+	repositoryBackendMode db.RepositoryBackendMode,
 ) (*ApplicationController, error) {
 	log.Infof("appResyncPeriod=%v, appHardResyncPeriod=%v, appResyncJitter=%v", appResyncPeriod, appHardResyncPeriod, appResyncJitter)
-	db := db.NewDB(namespace, settingsMgr, kubeClientset)
+
+	// Initialize database with CRD backend if enabled
+	var argoDB db.ArgoDB
+
+	if repositoryBackendMode == db.RepositoryBackendModeCRD || repositoryBackendMode == db.RepositoryBackendModeHybrid {
+		log.Info("Using CRD backend for repository storage")
+		argoDB = db.NewDB(namespace, settingsMgr, kubeClientset, repositoryBackendMode, applicationClientset)
+	} else {
+		log.Info("Using Secrets backend for repository storage")
+		argoDB = db.NewDB(namespace, settingsMgr, kubeClientset, db.RepositoryBackendModeSecret, nil)
+	}
+
 	if rateLimiterConfig == nil {
 		rateLimiterConfig = ratelimiter.GetDefaultAppRateLimiterConfig()
 		log.Info("Using default workqueue rate limiter config")
@@ -199,7 +211,7 @@ func NewApplicationController(
 		appComparisonTypeRefreshQueue:     workqueue.NewTypedRateLimitingQueue(ratelimiter.NewCustomAppControllerRateLimiter[string](rateLimiterConfig)),
 		appHydrateQueue:                   workqueue.NewTypedRateLimitingQueueWithConfig(ratelimiter.NewCustomAppControllerRateLimiter[string](rateLimiterConfig), workqueue.TypedRateLimitingQueueConfig[string]{Name: "app_hydration_queue"}),
 		hydrationQueue:                    workqueue.NewTypedRateLimitingQueueWithConfig(ratelimiter.NewCustomAppControllerRateLimiter[hydratortypes.HydrationQueueKey](rateLimiterConfig), workqueue.TypedRateLimitingQueueConfig[hydratortypes.HydrationQueueKey]{Name: "manifest_hydration_queue"}),
-		db:                                db,
+		db:                                argoDB,
 		statusRefreshTimeout:              appResyncPeriod,
 		statusHardRefreshTimeout:          appHardResyncPeriod,
 		statusRefreshJitter:               appResyncJitter,
@@ -218,7 +230,7 @@ func NewApplicationController(
 		metricsClusterLabels:              metricsClusterLabels,
 	}
 	if hydratorEnabled {
-		ctrl.hydrator = hydrator.NewHydrator(&ctrl, appResyncPeriod, commitClientset, repoClientset, db)
+		ctrl.hydrator = hydrator.NewHydrator(&ctrl, appResyncPeriod, commitClientset, repoClientset, argoDB)
 	}
 	if kubectlParallelismLimit > 0 {
 		ctrl.kubectlSemaphore = semaphore.NewWeighted(kubectlParallelismLimit)
@@ -227,6 +239,7 @@ func NewApplicationController(
 	appInformer, appLister := ctrl.newApplicationInformerAndLister()
 	indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
 	projInformer := v1alpha1.NewAppProjectInformer(applicationClientset, namespace, appResyncPeriod, indexers)
+
 	var err error
 	_, err = projInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
@@ -326,8 +339,8 @@ func NewApplicationController(
 			return nil, err
 		}
 	}
-	stateCache := statecache.NewLiveStateCache(db, appInformer, ctrl.settingsMgr, ctrl.metricsServer, ctrl.handleObjectUpdated, clusterSharding, argo.NewResourceTracking())
-	appStateManager := NewAppStateManager(db, applicationClientset, repoClientset, namespace, kubectl, ctrl.onKubectlRun, ctrl.settingsMgr, stateCache, ctrl.metricsServer, argoCache, ctrl.statusRefreshTimeout, argo.NewResourceTracking(), persistResourceHealth, repoErrorGracePeriod, serverSideDiff, ignoreNormalizerOpts)
+	stateCache := statecache.NewLiveStateCache(argoDB, appInformer, ctrl.settingsMgr, ctrl.metricsServer, ctrl.handleObjectUpdated, clusterSharding, argo.NewResourceTracking())
+	appStateManager := NewAppStateManager(argoDB, applicationClientset, repoClientset, namespace, common.ApplicationController, kubectl, ctrl.onKubectlRun, ctrl.settingsMgr, stateCache, ctrl.metricsServer, argoCache, ctrl.statusRefreshTimeout, argo.NewResourceTracking(), persistResourceHealth, repoErrorGracePeriod, serverSideDiff, ignoreNormalizerOpts, ctrl.auditLogger)
 	ctrl.appInformer = appInformer
 	ctrl.appLister = appLister
 	ctrl.projInformer = projInformer

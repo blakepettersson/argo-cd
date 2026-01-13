@@ -115,6 +115,25 @@ rules:
   - patch
   - delete
 - apiGroups:
+  - argoproj.io
+  resources:
+  - repositories
+  - repositorycredentials
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - repositories/status
+  - repositorycredentials/status
+  verbs:
+  - update
+  - patch
+- apiGroups:
   - ""
   resources:
   - events

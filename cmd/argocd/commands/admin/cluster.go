@@ -82,7 +82,8 @@ type ClusterWithInfo struct {
 func loadClusters(ctx context.Context, kubeClient kubernetes.Interface, appClient versioned.Interface, replicas int, shardingAlgorithm string, namespace string, portForwardRedis bool, cacheSrc func() (*appstatecache.Cache, error), shard int, redisName string, redisHaProxyName string, redisCompressionStr string) ([]ClusterWithInfo, error) {
 	settingsMgr := settings.NewSettingsManager(ctx, kubeClient, namespace)
 
-	argoDB := db.NewDB(namespace, settingsMgr, kubeClient)
+	// TODO: fix
+	argoDB := db.NewDB(namespace, settingsMgr, kubeClient, db.RepositoryBackendModeSecret, nil)
 	clustersList, err := argoDB.ListClusters(ctx)
 	if err != nil {
 		return nil, err
@@ -267,7 +268,8 @@ func runClusterNamespacesCommand(ctx context.Context, clientConfig clientcmd.Cli
 	appClient := versioned.NewForConfigOrDie(clientCfg)
 
 	settingsMgr := settings.NewSettingsManager(ctx, kubeClient, namespace)
-	argoDB := db.NewDB(namespace, settingsMgr, kubeClient)
+	// TODO: fix
+	argoDB := db.NewDB(namespace, settingsMgr, kubeClient, db.RepositoryBackendModeSecret, nil)
 	clustersList, err := argoDB.ListClusters(ctx)
 	if err != nil {
 		return fmt.Errorf("error listing clusters: %w", err)
@@ -555,7 +557,8 @@ argocd admin cluster kubeconfig https://cluster-api-url:6443 /path/to/output/kub
 			kubeclientset, err := kubernetes.NewForConfig(conf)
 			errors.CheckError(err)
 
-			cluster, err := db.NewDB(namespace, settings.NewSettingsManager(ctx, kubeclientset, namespace), kubeclientset).GetCluster(ctx, serverURL)
+			// TODO: fix
+			cluster, err := db.NewDB(namespace, settings.NewSettingsManager(ctx, kubeclientset, namespace), kubeclientset, db.RepositoryBackendModeHybrid, nil).GetCluster(ctx, serverURL)
 			errors.CheckError(err)
 			rawConfig, err := cluster.RawRestConfig()
 			errors.CheckError(err)
@@ -680,7 +683,8 @@ func NewGenClusterConfigCommand(pathOpts *clientcmd.PathOptions) *cobra.Command 
 			}
 
 			settingsMgr := settings.NewSettingsManager(ctx, kubeClientset, ArgoCDNamespace)
-			argoDB := db.NewDB(ArgoCDNamespace, settingsMgr, kubeClientset)
+			// TODO: fix
+			argoDB := db.NewDB(ArgoCDNamespace, settingsMgr, kubeClientset, db.RepositoryBackendModeSecret, nil)
 
 			_, err = argoDB.CreateCluster(ctx, clst)
 			errors.CheckError(err)

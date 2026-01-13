@@ -46,7 +46,8 @@ type argoCDService struct {
 }
 
 func (svc *argoCDService) GetCommitMetadata(ctx context.Context, repoURL string, commitSHA string, project string) (*shared.CommitMetadata, error) {
-	argocdDB := db.NewDB(svc.namespace, svc.settingsMgr, svc.clientset)
+	// TODO: fix
+	argocdDB := db.NewDB(svc.namespace, svc.settingsMgr, svc.clientset, db.RepositoryBackendModeSecret, nil)
 	repo, err := argocdDB.GetRepository(ctx, repoURL, project)
 	if err != nil {
 		return nil, err
@@ -68,8 +69,8 @@ func (svc *argoCDService) GetCommitMetadata(ctx context.Context, repoURL string,
 
 func (svc *argoCDService) GetAppDetails(ctx context.Context, app *v1alpha1.Application) (*shared.AppDetail, error) {
 	appSource := app.Spec.GetSourcePtrByIndex(0)
-
-	argocdDB := db.NewDB(svc.namespace, svc.settingsMgr, svc.clientset)
+	// TODO: fix
+	argocdDB := db.NewDB(svc.namespace, svc.settingsMgr, svc.clientset, db.RepositoryBackendModeSecret, nil)
 	repo, err := argocdDB.GetRepository(ctx, appSource.RepoURL, app.Spec.Project)
 	if err != nil {
 		return nil, err

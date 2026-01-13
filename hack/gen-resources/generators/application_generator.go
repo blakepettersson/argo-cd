@@ -63,11 +63,11 @@ func (generator *ApplicationGenerator) buildDestination(opts *util.GenerateOpts,
 
 func (generator *ApplicationGenerator) Generate(opts *util.GenerateOpts) error {
 	settingsMgr := settings.NewSettingsManager(context.TODO(), generator.clientSet, opts.Namespace)
-	repositories, err := db.NewDB(opts.Namespace, settingsMgr, generator.clientSet).ListRepositories(context.TODO())
+	repositories, err := db.NewDB(opts.Namespace, settingsMgr, generator.clientSet, db.RepositoryBackendModeSecret, generator.argoClientSet).ListRepositories(context.TODO())
 	if err != nil {
 		return err
 	}
-	clusters, err := db.NewDB(opts.Namespace, settingsMgr, generator.clientSet).ListClusters(context.TODO())
+	clusters, err := db.NewDB(opts.Namespace, settingsMgr, generator.clientSet, db.RepositoryBackendModeSecret, generator.argoClientSet).ListClusters(context.TODO())
 	if err != nil {
 		return err
 	}

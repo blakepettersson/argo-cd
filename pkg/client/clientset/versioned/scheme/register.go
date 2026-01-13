@@ -3,6 +3,7 @@
 package scheme
 
 import (
+	argoprojv1alpha0 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha0"
 	argoprojv1alpha1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -15,6 +16,7 @@ var Scheme = runtime.NewScheme()
 var Codecs = serializer.NewCodecFactory(Scheme)
 var ParameterCodec = runtime.NewParameterCodec(Scheme)
 var localSchemeBuilder = runtime.SchemeBuilder{
+	argoprojv1alpha0.AddToScheme,
 	argoprojv1alpha1.AddToScheme,
 }
 

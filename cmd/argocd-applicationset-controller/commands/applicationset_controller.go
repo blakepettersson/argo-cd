@@ -191,7 +191,8 @@ func NewCommand() *cobra.Command {
 			errors.CheckError(err)
 
 			argoSettingsMgr := argosettings.NewSettingsManager(ctx, k8sClient, namespace)
-			argoCDDB := db.NewDB(namespace, argoSettingsMgr, k8sClient)
+			// TODO: fix
+			argoCDDB := db.NewDB(namespace, argoSettingsMgr, k8sClient, db.RepositoryBackendModeSecret, nil)
 
 			scmConfig := generators.NewSCMConfig(scmRootCAPath, allowedScmProviders, enableScmProviders, enableGitHubAPIMetrics, github_app.NewAuthCredentials(argoCDDB.(db.RepoCredsDB)), tokenRefStrictMode)
 

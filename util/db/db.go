@@ -12,6 +12,7 @@ import (
 
 	"github.com/argoproj/argo-cd/v3/common"
 	appv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	appversioned "github.com/argoproj/argo-cd/v3/pkg/client/clientset/versioned"
 	"github.com/argoproj/argo-cd/v3/util/env"
 	"github.com/argoproj/argo-cd/v3/util/settings"
 )
@@ -125,17 +126,23 @@ type ArgoDB interface {
 }
 
 type db struct {
-	ns            string
-	kubeclientset kubernetes.Interface
-	settingsMgr   *settings.SettingsManager
+	ns                    string
+	kubeclientset         kubernetes.Interface
+	appclientset          appversioned.Interface // Optional: for CRD-based repository backend
+	settingsMgr           *settings.SettingsManager
+	repositoryBackendMode RepositoryBackendMode
 }
 
-// NewDB returns a new instance of the argo database
-func NewDB(namespace string, settingsMgr *settings.SettingsManager, kubeclientset kubernetes.Interface) ArgoDB {
+// NewDB returns a new instance of the argo database with app clientset
+// When appclientset is provided, the repository backend will use CRDs (via hybrid backend)
+// instead of Secrets.
+func NewDB(namespace string, settingsMgr *settings.SettingsManager, kubeclientset kubernetes.Interface, repositoryBackendMode RepositoryBackendMode, appclientset appversioned.Interface) ArgoDB {
 	return &db{
-		settingsMgr:   settingsMgr,
-		ns:            namespace,
-		kubeclientset: kubeclientset,
+		settingsMgr:           settingsMgr,
+		ns:                    namespace,
+		kubeclientset:         kubeclientset,
+		appclientset:          appclientset,
+		repositoryBackendMode: repositoryBackendMode,
 	}
 }
 

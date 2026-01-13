@@ -41,6 +41,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/yaml"
 
+	"github.com/argoproj/argo-cd/v3/util/db"
 	dbmocks "github.com/argoproj/argo-cd/v3/util/db/mocks"
 
 	mockcommitclient "github.com/argoproj/argo-cd/v3/commitserver/apiclient/mocks"
@@ -196,11 +197,12 @@ func newFakeControllerWithResync(ctx context.Context, data *fakeData, appResyncP
 		normalizers.IgnoreNormalizerOpts{},
 		testEnableEventList,
 		false,
+		db.RepositoryBackendModeSecret,
 	)
-	db := &dbmocks.ArgoDB{}
-	db.EXPECT().GetApplicationControllerReplicas().Return(1).Maybe()
+	argoDB := &dbmocks.ArgoDB{}
+	argoDB.EXPECT().GetApplicationControllerReplicas().Return(1).Maybe()
 	// Setting a default sharding algorithm for the tests where we cannot set it.
-	ctrl.clusterSharding = sharding.NewClusterSharding(db, 0, 1, common.DefaultShardingAlgorithm)
+	ctrl.clusterSharding = sharding.NewClusterSharding(argoDB, 0, 1, common.DefaultShardingAlgorithm)
 	if err != nil {
 		panic(err)
 	}

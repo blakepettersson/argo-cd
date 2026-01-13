@@ -71,7 +71,7 @@ func TestClusterSecretUpdater(t *testing.T) {
 	appclientset := appsfake.NewSimpleClientset()
 	appInformer := appinformers.NewApplicationInformer(appclientset, "", time.Minute, cache.Indexers{})
 	settingsManager := settings.NewSettingsManager(t.Context(), kubeclientset, fakeNamespace)
-	argoDB := db.NewDB(fakeNamespace, settingsManager, kubeclientset)
+	argoDB := db.NewDB(fakeNamespace, settingsManager, kubeclientset, db.RepositoryBackendModeSecret, appclientset)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 

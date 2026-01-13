@@ -24,4 +24,18 @@ const (
 	ApplicationSetShortName string = "appset"
 	ApplicationSetPlural    string = "applicationsets"
 	ApplicationSetFullName  string = ApplicationSetPlural + "." + Group
+
+	// Repository constants
+	RepositoryKind      string = "Repository"
+	RepositorySingular  string = "repository"
+	RepositoryShortName string = "repo"
+	RepositoryPlural    string = "repositories"
+	RepositoryFullName  string = RepositoryPlural + "." + Group
+
+	// RepositoryCredentials constants
+	RepositoryCredentialsKind      string = "RepositoryCredentials"
+	RepositoryCredentialsSingular  string = "repositorycredentials"
+	RepositoryCredentialsShortName string = "repocreds"
+	RepositoryCredentialsPlural    string = "repositorycredentials"
+	RepositoryCredentialsFullName  string = RepositoryCredentialsPlural + "." + Group
 )

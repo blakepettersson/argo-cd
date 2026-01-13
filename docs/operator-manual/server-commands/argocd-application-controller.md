@@ -64,6 +64,10 @@ argocd-application-controller [flags]
       --redis-insecure-skip-tls-verify                            Skip Redis server certificate validation.
       --redis-use-tls                                             Use TLS when connecting to Redis. 
       --redisdb int                                               Redis database.
+      --repo-controller-enabled                                   Enables the Repository CRD controller that monitors repository connection status (default true)
+      --repo-controller-test-interval duration                    Interval between repository connection tests (default 3m0s)
+      --repo-controller-test-timeout duration                     Timeout for repository connection tests (default 30s)
+      --repo-controller-workers int                               Number of repository controller workers (default 2)
       --repo-error-grace-period-seconds int                       Grace period in seconds for ignoring consecutive errors while communicating with repo server. (default 180)
       --repo-server string                                        Repo server address. (default "argocd-repo-server:8081")
       --repo-server-plaintext                                     Disable TLS on connections to repo server
