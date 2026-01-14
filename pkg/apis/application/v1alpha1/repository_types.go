@@ -118,6 +118,20 @@ type Repository struct {
 	InsecureOCIForceHttp bool `json:"insecureOCIForceHttp,omitempty" protobuf:"bytes,26,opt,name=insecureOCIForceHttp"` //nolint:revive //FIXME(var-naming)
 	// Depth specifies the depth for shallow clones. A value of 0 or omitting the field indicates a full clone.
 	Depth int64 `json:"depth,omitempty" protobuf:"bytes,27,opt,name=depth"`
+	// UseWorkloadIdentity specifies whether to use workload identity for authentication.
+	// When enabled, the app-controller resolves credentials from the project-specific service account
+	// (argocd-project-<projectName>) before passing the repository to the repo-server.
+	UseWorkloadIdentity bool `json:"useWorkloadIdentity,omitempty" protobuf:"bytes,28,opt,name=useWorkloadIdentity"`
+	// WorkloadIdentityProvider specifies the provider for workload identity ("aws", "gcp", "azure", or custom provider name)
+	WorkloadIdentityProvider string `json:"workloadIdentityProvider,omitempty" protobuf:"bytes,29,opt,name=workloadIdentityProvider"`
+	// WorkloadIdentityTokenURL optionally specifies a custom token endpoint URL (e.g., for GovCloud/sovereign clouds)
+	WorkloadIdentityTokenURL string `json:"workloadIdentityTokenURL,omitempty" protobuf:"bytes,30,opt,name=workloadIdentityTokenURL"`
+	// WorkloadIdentityAudience optionally specifies a custom audience for the K8s JWT token
+	WorkloadIdentityAudience string `json:"workloadIdentityAudience,omitempty" protobuf:"bytes,31,opt,name=workloadIdentityAudience"`
+	// WorkloadIdentityRegistryAuthURL optionally specifies a registry auth endpoint (for generic provider with Docker Registry Token Auth)
+	WorkloadIdentityRegistryAuthURL string `json:"workloadIdentityRegistryAuthURL,omitempty" protobuf:"bytes,32,opt,name=workloadIdentityRegistryAuthURL"`
+	// WorkloadIdentityRegistryService optionally specifies a registry service name (for generic provider)
+	WorkloadIdentityRegistryService string `json:"workloadIdentityRegistryService,omitempty" protobuf:"bytes,33,opt,name=workloadIdentityRegistryService"`
 }
 
 // IsInsecure returns true if the repository has been configured to skip server verification or set to HTTP only
@@ -132,7 +146,7 @@ func (repo *Repository) IsLFSEnabled() bool {
 
 // HasCredentials returns true when the repository has been configured with any credentials
 func (repo *Repository) HasCredentials() bool {
-	return repo.Username != "" || repo.Password != "" || repo.BearerToken != "" || repo.SSHPrivateKey != "" || repo.TLSClientCertData != "" || repo.GithubAppPrivateKey != "" || repo.UseAzureWorkloadIdentity
+	return repo.Username != "" || repo.Password != "" || repo.BearerToken != "" || repo.SSHPrivateKey != "" || repo.TLSClientCertData != "" || repo.GithubAppPrivateKey != "" || repo.UseAzureWorkloadIdentity || repo.UseWorkloadIdentity
 }
 
 // CopyCredentialsFromRepo copies all credential information from source repository to receiving repository
