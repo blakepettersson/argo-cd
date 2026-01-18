@@ -407,6 +407,18 @@ func secretToRepository(secret *corev1.Secret) (*appsv1.Repository, error) {
 	}
 	repository.Depth = depth
 
+	useWorkloadIdentity, err := boolOrFalse(secret, "useWorkloadIdentity")
+	if err != nil {
+		return repository, err
+	}
+	repository.UseWorkloadIdentity = useWorkloadIdentity
+
+	repository.WorkloadIdentityProvider = string(secretCopy.Data["workloadIdentityProvider"])
+	repository.WorkloadIdentityTokenURL = string(secretCopy.Data["workloadIdentityTokenURL"])
+	repository.WorkloadIdentityAudience = string(secretCopy.Data["workloadIdentityAudience"])
+	repository.WorkloadIdentityRegistryAuthURL = string(secretCopy.Data["workloadIdentityRegistryAuthURL"])
+	repository.WorkloadIdentityRegistryService = string(secretCopy.Data["workloadIdentityRegistryService"])
+
 	return repository, nil
 }
 
@@ -444,6 +456,12 @@ func (s *secretsRepositoryBackend) repositoryToSecret(repository *appsv1.Reposit
 	updateSecretBool(secretCopy, "forceHttpBasicAuth", repository.ForceHttpBasicAuth)
 	updateSecretBool(secretCopy, "useAzureWorkloadIdentity", repository.UseAzureWorkloadIdentity)
 	updateSecretInt(secretCopy, "depth", repository.Depth)
+	updateSecretBool(secretCopy, "useWorkloadIdentity", repository.UseWorkloadIdentity)
+	updateSecretString(secretCopy, "workloadIdentityProvider", repository.WorkloadIdentityProvider)
+	updateSecretString(secretCopy, "workloadIdentityTokenURL", repository.WorkloadIdentityTokenURL)
+	updateSecretString(secretCopy, "workloadIdentityAudience", repository.WorkloadIdentityAudience)
+	updateSecretString(secretCopy, "workloadIdentityRegistryAuthURL", repository.WorkloadIdentityRegistryAuthURL)
+	updateSecretString(secretCopy, "workloadIdentityRegistryService", repository.WorkloadIdentityRegistryService)
 	addSecretMetadata(secretCopy, s.getSecretType())
 
 	return secretCopy
