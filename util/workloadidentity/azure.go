@@ -1,5 +1,71 @@
 package workloadidentity
 
+// # Azure Workload Identity Setup
+//
+// This file implements Azure Workload Identity Federation for authenticating to Azure Container
+// Registry (ACR) using Kubernetes service account tokens.
+//
+// ## Required Azure Setup
+//
+// 1. Set environment variables:
+//
+//	export AZURE_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+//	export AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)
+//	export RESOURCE_GROUP="<your-resource-group>"
+//	export ACR_NAME="<your-acr-name>"
+//	export ARGOCD_NAMESPACE="argocd"
+//	export PROJECT_NAME="default"
+//
+// 2. Get your cluster's OIDC issuer URL (for AKS):
+//
+//	export OIDC_ISSUER=$(az aks show --resource-group $RESOURCE_GROUP \
+//	    --name $CLUSTER_NAME --query "oidcIssuerProfile.issuerUrl" -o tsv)
+//
+// 3. Create an Azure AD application:
+//
+//	export APP_NAME="argocd-project-${PROJECT_NAME}"
+//	az ad app create --display-name $APP_NAME
+//	export APP_CLIENT_ID=$(az ad app list --display-name $APP_NAME --query "[0].appId" -o tsv)
+//	az ad sp create --id $APP_CLIENT_ID
+//
+// 4. Add federated credential (trust the K8s ServiceAccount):
+//
+//	cat <<EOF > federated-credential.json
+//	{
+//	  "name": "argocd-${PROJECT_NAME}-federated",
+//	  "issuer": "${OIDC_ISSUER}",
+//	  "subject": "system:serviceaccount:${ARGOCD_NAMESPACE}:argocd-project-${PROJECT_NAME}",
+//	  "audiences": ["api://AzureADTokenExchange"]
+//	}
+//	EOF
+//	az ad app federated-credential create --id $APP_CLIENT_ID --parameters federated-credential.json
+//
+// 5. Grant the application access to ACR:
+//
+//	export ACR_ID=$(az acr show --name $ACR_NAME --query id -o tsv)
+//	az role assignment create --assignee $APP_CLIENT_ID --role "AcrPull" --scope $ACR_ID
+//
+// ## Required Kubernetes ServiceAccount Annotations
+//
+// The Kubernetes ServiceAccount (argocd-project-<name>) needs these annotations:
+//
+//   - azure.workload.identity/client-id: The Azure AD application (client) ID
+//   - azure.workload.identity/tenant-id: The Azure AD tenant ID
+//
+// ## Required Repository Secret Fields
+//
+//   - useWorkloadIdentity: "true"
+//   - workloadIdentityProvider: "azure"
+//   - project: "<argocd-project-name>" (maps to argocd-project-<name> ServiceAccount)
+//
+// ## Authentication Flow
+//
+// 1. Request a K8s token for the project ServiceAccount via TokenRequest API
+//    (with audience "api://AzureADTokenExchange")
+// 2. Exchange the K8s token for an Azure access token via Azure AD OAuth endpoint
+// 3. Exchange the Azure access token for an ACR refresh token
+// 4. Return the ACR refresh token for use with the registry
+
 import (
 	"context"
 	"encoding/json"
@@ -12,7 +78,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// resolveAzure resolves Azure ACR credentials using Azure Workload Identity
+// resolveAzure resolves Azure ACR credentials using Azure Workload Identity.
+//
+// The flow is:
+// 1. Exchange K8s JWT for Azure access token (via Azure AD/Entra ID)
+// 2. Exchange Azure access token for ACR refresh token
+// 3. Return credentials for ACR authentication
 func (r *Resolver) resolveAzure(ctx context.Context, sa *corev1.ServiceAccount, k8sToken, repoURL string, config *ProviderConfig) (*Credentials, error) {
 	// Get Azure client ID and tenant ID from standard Azure Workload Identity annotations on service account
 	clientID := sa.Annotations[AnnotationAzureClientID]
