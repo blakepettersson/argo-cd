@@ -99,7 +99,7 @@ func (r *Resolver) ResolveCredentials(ctx context.Context, projectName, repoURL 
 	case "azure":
 		return r.resolveAzure(ctx, sa, k8sToken, repoURL, config)
 	case "spiffe":
-		return r.resolveSPIFFE(ctx, repoURL, config)
+		return r.resolveSPIFFE(ctx, sa, repoURL, config)
 	case "generic":
 		// RFC 8693 token exchange or direct K8s OIDC
 		return r.resolveGeneric(ctx, sa, k8sToken, repoURL, config)

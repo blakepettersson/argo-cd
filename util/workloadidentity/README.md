@@ -32,10 +32,11 @@ This package provides a practical implementation of cloud-agnostic workload iden
    - ACR refresh token exchange
    - Support for sovereign clouds (Government, China)
 
-6. **generic.go** - Custom registry support via RFC 8693
+6. **oidc_exchange.go** - OIDC token exchange for custom registries
+   - RFC 8693 OAuth 2.0 Token Exchange
    - Two-step token exchange (K8s JWT → Identity Token → Registry Token)
    - Supports SPIFFE/SPIRE, Harbor, Quay, GitLab, etc.
-   - Docker Registry Token Authentication (RFC 7235)
+   - Docker Registry Token Authentication
 
 ### Type Changes
 
