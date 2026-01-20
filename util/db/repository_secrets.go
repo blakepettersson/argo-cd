@@ -418,6 +418,7 @@ func secretToRepository(secret *corev1.Secret) (*appsv1.Repository, error) {
 	repository.WorkloadIdentityAudience = string(secretCopy.Data["workloadIdentityAudience"])
 	repository.WorkloadIdentityRegistryAuthURL = string(secretCopy.Data["workloadIdentityRegistryAuthURL"])
 	repository.WorkloadIdentityRegistryService = string(secretCopy.Data["workloadIdentityRegistryService"])
+	repository.WorkloadIdentityRegistryUsername = string(secretCopy.Data["workloadIdentityRegistryUsername"])
 
 	return repository, nil
 }
@@ -462,6 +463,7 @@ func (s *secretsRepositoryBackend) repositoryToSecret(repository *appsv1.Reposit
 	updateSecretString(secretCopy, "workloadIdentityAudience", repository.WorkloadIdentityAudience)
 	updateSecretString(secretCopy, "workloadIdentityRegistryAuthURL", repository.WorkloadIdentityRegistryAuthURL)
 	updateSecretString(secretCopy, "workloadIdentityRegistryService", repository.WorkloadIdentityRegistryService)
+	updateSecretString(secretCopy, "workloadIdentityRegistryUsername", repository.WorkloadIdentityRegistryUsername)
 	addSecretMetadata(secretCopy, s.getSecretType())
 
 	return secretCopy

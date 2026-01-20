@@ -1972,6 +1972,9 @@ message Repository {
 
   // WorkloadIdentityRegistryService optionally specifies a registry service name (for generic provider)
   optional string workloadIdentityRegistryService = 33;
+
+  // WorkloadIdentityRegistryUsername optionally specifies a username for Basic Auth with registry (e.g., Quay robot account "org+robot")
+  optional string workloadIdentityRegistryUsername = 34;
 }
 
 // A RepositoryCertificate is either SSH known hosts entry or TLS certificate

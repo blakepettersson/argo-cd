@@ -14,8 +14,9 @@ const (
 	FieldProvider        = "workloadIdentityProvider"        // e.g., "aws", "gcp", "azure", "generic"
 	FieldTokenURL        = "workloadIdentityTokenURL"        // Optional: override default token endpoint
 	FieldAudience        = "workloadIdentityAudience"        // Optional: custom audience for token
-	FieldRegistryAuthURL = "workloadIdentityRegistryAuthURL" // Optional: registry auth endpoint for generic provider
-	FieldRegistryService = "workloadIdentityRegistryService" // Optional: registry service name for generic provider
+	FieldRegistryAuthURL  = "workloadIdentityRegistryAuthURL"  // Optional: registry auth endpoint for generic provider
+	FieldRegistryService  = "workloadIdentityRegistryService"  // Optional: registry service name for generic provider
+	FieldRegistryUsername = "workloadIdentityRegistryUsername" // Optional: registry username for Basic Auth (e.g., Quay robot account)
 
 	// Standard cloud provider annotation fields (on service accounts)
 	AnnotationAWSRoleARN     = "eks.amazonaws.com/role-arn"
@@ -46,11 +47,12 @@ func NewResolver(clientset kubernetes.Interface, namespace string) *Resolver {
 
 // ProviderConfig holds workload identity provider configuration from the repository
 type ProviderConfig struct {
-	Provider        string // "aws", "gcp", "azure", or custom provider name
-	TokenURL        string // Optional: override default token endpoint
-	Audience        string // Optional: custom audience for token
-	RegistryAuthURL string // Optional: registry auth endpoint (for generic provider)
-	RegistryService string // Optional: registry service name (for generic provider)
+	Provider         string // "aws", "gcp", "azure", or custom provider name
+	TokenURL         string // Optional: override default token endpoint
+	Audience         string // Optional: custom audience for token
+	RegistryAuthURL  string // Optional: registry auth endpoint (for generic provider)
+	RegistryService  string // Optional: registry service name (for generic provider)
+	RegistryUsername string // Optional: username for Basic Auth (e.g., Quay robot account "org+robot")
 }
 
 // ResolveCredentials resolves workload identity credentials for a repository

@@ -478,11 +478,12 @@ func (db *db) enrichWriteCredsToRepo(ctx context.Context, repository *v1alpha1.R
 func (db *db) enrichWorkloadIdentity(ctx context.Context, repository *v1alpha1.Repository) error {
 	// Extract provider configuration from repository fields
 	config := &workloadidentity.ProviderConfig{
-		Provider:        repository.WorkloadIdentityProvider,
-		TokenURL:        repository.WorkloadIdentityTokenURL,
-		Audience:        repository.WorkloadIdentityAudience,
-		RegistryAuthURL: repository.WorkloadIdentityRegistryAuthURL,
-		RegistryService: repository.WorkloadIdentityRegistryService,
+		Provider:         repository.WorkloadIdentityProvider,
+		TokenURL:         repository.WorkloadIdentityTokenURL,
+		Audience:         repository.WorkloadIdentityAudience,
+		RegistryAuthURL:  repository.WorkloadIdentityRegistryAuthURL,
+		RegistryService:  repository.WorkloadIdentityRegistryService,
+		RegistryUsername: repository.WorkloadIdentityRegistryUsername,
 	}
 
 	// Create workload identity resolver

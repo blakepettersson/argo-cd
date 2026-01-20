@@ -385,9 +385,16 @@ func (r *Resolver) exchangeGenericToken(ctx context.Context, tokenURL, subjectTo
 
 // exchangeRegistryToken exchanges an identity token for registry-specific credentials
 // This implements Docker Registry Token Authentication (RFC 7235)
+//
+// Two auth modes are supported:
+// - Basic Auth: When RegistryUsername is set (e.g., Quay robot account federation)
+//   Uses username:token as Basic Auth credentials
+// - Bearer Auth: When RegistryUsername is empty (standard Docker registry auth)
+//   Sends token as Bearer header
 func (r *Resolver) exchangeRegistryToken(ctx context.Context, config *ProviderConfig, identityToken, repoURL string) (*Credentials, error) {
 	registryAuthURL := config.RegistryAuthURL
 	registryService := config.RegistryService
+	registryUsername := config.RegistryUsername
 
 	if registryService == "" {
 		// Try to extract service from repo URL
@@ -399,12 +406,21 @@ func (r *Resolver) exchangeRegistryToken(ctx context.Context, config *ProviderCo
 	scope := buildRegistryScope(repoURL)
 	tokenURL := fmt.Sprintf("%s?service=%s&scope=%s", registryAuthURL, registryService, url.QueryEscape(scope))
 
-	// Create HTTP request with identity token as Bearer authorization
+	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, "GET", tokenURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create registry token request: %w", err)
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", identityToken))
+
+	// Set authorization header based on whether username is provided
+	if registryUsername != "" {
+		// Basic Auth mode (e.g., Quay robot account federation)
+		// Format: username:JWT_token as Basic Auth
+		req.SetBasicAuth(registryUsername, identityToken)
+	} else {
+		// Bearer Auth mode (standard Docker registry)
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", identityToken))
+	}
 
 	// Execute request
 	resp, err := http.DefaultClient.Do(req)

@@ -9672,6 +9672,10 @@
           "type": "string",
           "title": "WorkloadIdentityRegistryService optionally specifies a registry service name (for generic provider)"
         },
+        "workloadIdentityRegistryUsername": {
+          "type": "string",
+          "title": "WorkloadIdentityRegistryUsername optionally specifies a username for Basic Auth with registry (e.g., Quay robot account \"org+robot\")"
+        },
         "workloadIdentityTokenURL": {
           "type": "string",
           "title": "WorkloadIdentityTokenURL optionally specifies a custom token endpoint URL (e.g., for GovCloud/sovereign clouds)"

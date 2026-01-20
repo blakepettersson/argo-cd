@@ -132,6 +132,8 @@ type Repository struct {
 	WorkloadIdentityRegistryAuthURL string `json:"workloadIdentityRegistryAuthURL,omitempty" protobuf:"bytes,32,opt,name=workloadIdentityRegistryAuthURL"`
 	// WorkloadIdentityRegistryService optionally specifies a registry service name (for generic provider)
 	WorkloadIdentityRegistryService string `json:"workloadIdentityRegistryService,omitempty" protobuf:"bytes,33,opt,name=workloadIdentityRegistryService"`
+	// WorkloadIdentityRegistryUsername optionally specifies a username for Basic Auth with registry (e.g., Quay robot account "org+robot")
+	WorkloadIdentityRegistryUsername string `json:"workloadIdentityRegistryUsername,omitempty" protobuf:"bytes,34,opt,name=workloadIdentityRegistryUsername"`
 }
 
 // IsInsecure returns true if the repository has been configured to skip server verification or set to HTTP only
