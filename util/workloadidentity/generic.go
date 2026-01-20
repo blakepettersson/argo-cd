@@ -271,6 +271,7 @@ package workloadidentity
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -280,6 +281,18 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 )
+
+// httpClient returns an HTTP client configured based on the insecure flag
+func httpClient(insecure bool) *http.Client {
+	if insecure {
+		return &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		}
+	}
+	return http.DefaultClient
+}
 
 // resolveGeneric resolves credentials for custom registries using RFC 8693 token exchange.
 //
@@ -304,19 +317,19 @@ func (r *Resolver) resolveGeneric(ctx context.Context, sa *corev1.ServiceAccount
 	var err error
 
 	if tokenURL != "" {
-		// Mode 1 or 2: Exchange K8s token for identity token first
+		// Mode 1: Exchange K8s token for identity token via RFC 8693
 		audience := config.Audience
 		if audience == "" {
 			return nil, fmt.Errorf("workloadIdentityAudience not specified for generic provider with tokenURL")
 		}
 
-		// Exchange K8s JWT for identity token (e.g., SPIFFE JWT from SPIRE)
-		identityToken, err = r.exchangeGenericToken(ctx, tokenURL, k8sToken, audience)
+		// Exchange K8s JWT for identity token
+		identityToken, err = r.exchangeGenericToken(ctx, tokenURL, k8sToken, audience, config.Insecure)
 		if err != nil {
 			return nil, fmt.Errorf("failed to exchange token: %w", err)
 		}
 	} else {
-		// Mode 3: Use K8s token directly (Option B - direct K8s OIDC to registry)
+		// Mode 2: Use K8s token directly (direct K8s OIDC to registry)
 		identityToken = k8sToken
 	}
 
@@ -340,7 +353,7 @@ func (r *Resolver) resolveGeneric(ctx context.Context, sa *corev1.ServiceAccount
 }
 
 // exchangeGenericToken performs RFC 8693 OAuth 2.0 Token Exchange
-func (r *Resolver) exchangeGenericToken(ctx context.Context, tokenURL, subjectToken, audience string) (string, error) {
+func (r *Resolver) exchangeGenericToken(ctx context.Context, tokenURL, subjectToken, audience string, insecure bool) (string, error) {
 	// Prepare RFC 8693 token exchange request
 	data := url.Values{}
 	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
@@ -357,7 +370,7 @@ func (r *Resolver) exchangeGenericToken(ctx context.Context, tokenURL, subjectTo
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// Execute request
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient(insecure).Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to execute token exchange: %w", err)
 	}
@@ -387,10 +400,10 @@ func (r *Resolver) exchangeGenericToken(ctx context.Context, tokenURL, subjectTo
 // This implements Docker Registry Token Authentication (RFC 7235)
 //
 // Two auth modes are supported:
-// - Basic Auth: When RegistryUsername is set (e.g., Quay robot account federation)
-//   Uses username:token as Basic Auth credentials
-// - Bearer Auth: When RegistryUsername is empty (standard Docker registry auth)
-//   Sends token as Bearer header
+//   - Basic Auth: When RegistryUsername is set (e.g., Quay robot account federation)
+//     Uses username:token as Basic Auth credentials
+//   - Bearer Auth: When RegistryUsername is empty (standard Docker registry auth)
+//     Sends token as Bearer header
 func (r *Resolver) exchangeRegistryToken(ctx context.Context, config *ProviderConfig, identityToken, repoURL string) (*Credentials, error) {
 	registryAuthURL := config.RegistryAuthURL
 	registryService := config.RegistryService
@@ -423,7 +436,7 @@ func (r *Resolver) exchangeRegistryToken(ctx context.Context, config *ProviderCo
 	}
 
 	// Execute request
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient(config.Insecure).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute registry token request: %w", err)
 	}
@@ -456,9 +469,10 @@ func (r *Resolver) exchangeRegistryToken(ctx context.Context, config *ProviderCo
 		return nil, fmt.Errorf("registry token response missing token field")
 	}
 
-	// For Docker Registry Token Authentication, username is typically empty
+	// Return the registry username with the token
+	// This allows the OCI client to authenticate at /v2/auth if needed
 	return &Credentials{
-		Username: "",
+		Username: registryUsername,
 		Password: token,
 	}, nil
 }

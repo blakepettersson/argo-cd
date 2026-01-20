@@ -484,6 +484,7 @@ func (db *db) enrichWorkloadIdentity(ctx context.Context, repository *v1alpha1.R
 		RegistryAuthURL:  repository.WorkloadIdentityRegistryAuthURL,
 		RegistryService:  repository.WorkloadIdentityRegistryService,
 		RegistryUsername: repository.WorkloadIdentityRegistryUsername,
+		Insecure:         repository.Insecure,
 	}
 
 	// Create workload identity resolver

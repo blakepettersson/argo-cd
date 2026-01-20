@@ -53,6 +53,7 @@ type ProviderConfig struct {
 	RegistryAuthURL  string // Optional: registry auth endpoint (for generic provider)
 	RegistryService  string // Optional: registry service name (for generic provider)
 	RegistryUsername string // Optional: username for Basic Auth (e.g., Quay robot account "org+robot")
+	Insecure         bool   // Optional: skip TLS certificate verification
 }
 
 // ResolveCredentials resolves workload identity credentials for a repository
@@ -88,8 +89,8 @@ func (r *Resolver) ResolveCredentials(ctx context.Context, projectName, repoURL 
 	}
 
 	// Exchange based on provider
-	// Built-in providers (aws, gcp, azure) have specific API calls they need to make
-	// Everything else uses the generic RFC 8693 token exchange flow
+	// Built-in providers (aws, gcp, azure, spiffe) have specific API calls they need to make
+	// "generic" uses RFC 8693 token exchange or direct K8s token
 	switch config.Provider {
 	case "aws":
 		return r.resolveAWS(ctx, sa, k8sToken, repoURL, config)
@@ -97,9 +98,13 @@ func (r *Resolver) ResolveCredentials(ctx context.Context, projectName, repoURL 
 		return r.resolveGCP(ctx, sa, k8sToken, config)
 	case "azure":
 		return r.resolveAzure(ctx, sa, k8sToken, repoURL, config)
-	default:
-		// All other providers (including custom Git/Helm/OCI registries) use generic RFC 8693
+	case "spiffe":
+		return r.resolveSPIFFE(ctx, repoURL, config)
+	case "generic":
+		// RFC 8693 token exchange or direct K8s OIDC
 		return r.resolveGeneric(ctx, sa, k8sToken, repoURL, config)
+	default:
+		return nil, fmt.Errorf("unsupported workload identity provider: %s", config.Provider)
 	}
 }
 
