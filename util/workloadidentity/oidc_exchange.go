@@ -1,256 +1,30 @@
 package workloadidentity
 
-// # Generic Workload Identity Provider
+// # OIDC Exchange Provider
 //
-// This file implements RFC 8693 OAuth 2.0 Token Exchange for custom identity providers
-// and registries. It supports a flexible two-step authentication flow that can be
-// configured for various identity systems including SPIFFE/SPIRE and container registries
-// like Quay, Harbor, and others.
+// This file implements RFC 8693 OAuth 2.0 Token Exchange for OIDC-based authentication
+// with container registries like Harbor, Quay (with K8s OIDC), GitLab, and others.
 //
-// ## Authentication Flow
+// The provider is configured via workloadIdentityProvider: "oidc" in repository secrets.
 //
-// The generic provider supports two modes:
+// For SPIFFE/SPIRE workload identity, use the dedicated "spiffe" provider instead,
+// which uses the SPIFFE Workload API directly with delegated identity support.
 //
-// 1. Single-step: Exchange K8s token for registry credentials directly
-//    - K8s JWT → Token Exchange Endpoint → Registry credentials
+// ## Authentication Modes
 //
-// 2. Two-step: Exchange K8s token for identity token, then for registry credentials
-//    - K8s JWT → Identity Provider (e.g., SPIRE) → Identity Token
-//    - Identity Token → Registry Auth Endpoint → Registry credentials
+// The OIDC provider supports two modes:
 //
-// ---
+// 1. Direct K8s OIDC: K8s token → Registry (registry trusts K8s OIDC issuer)
+//    - Requires: registryAuthURL
+//    - Simplest setup, no intermediate IdP
 //
-// # Option A: SPIFFE/SPIRE + Quay Setup
+// 2. Token Exchange: K8s token → Token Exchange → Registry
+//    - Requires: tokenURL, audience, registryAuthURL
+//    - For custom OIDC providers implementing RFC 8693
 //
-// This setup uses SPIRE as an intermediate identity provider with OIDC federation.
-// SPIRE provides workload attestation and issues SPIFFE JWT-SVIDs that Quay trusts.
+// ## Example: Harbor with K8s OIDC
 //
-// ## Architecture
-//
-//	┌─────────────────┐     ┌──────────────────┐     ┌─────────────┐
-//	│ ArgoCD (K8s SA) │────▶│ SPIRE OIDC Proxy │────▶│    Quay     │
-//	│    Token        │     │  (Token Exchange)│     │ (Registry)  │
-//	└─────────────────┘     └──────────────────┘     └─────────────┘
-//	                               │
-//	                               ▼
-//	                        SPIRE Server
-//	                        (OIDC Provider)
-//
-// ## Prerequisites
-//
-// 1. SPIRE server deployed with OIDC Discovery Provider enabled
-// 2. SPIRE OIDC token exchange proxy (handles K8s token → SPIFFE JWT conversion)
-// 3. Quay configured to trust SPIRE's OIDC issuer
-//
-// ## Step 1: Deploy SPIRE Server with OIDC Discovery Provider
-//
-// Configure SPIRE server with OIDC Discovery Provider in server.conf:
-//
-//	server {
-//	    trust_domain = "example.org"
-//	    # ... other config
-//	}
-//
-//	plugins {
-//	    KeyManager "disk" {
-//	        plugin_data {
-//	            keys_path = "/run/spire/data/keys.json"
-//	        }
-//	    }
-//	}
-//
-//	# Enable OIDC Discovery Provider
-//	oidc_discovery {
-//	    # Public URL where SPIRE's OIDC endpoints are accessible
-//	    issuer = "https://spire.example.org"
-//
-//	    # Allowed audiences for JWT-SVIDs
-//	    audiences = ["quay.example.org"]
-//	}
-//
-// ## Step 2: Deploy SPIRE OIDC Token Exchange Proxy
-//
-// You need a service that accepts K8s tokens and exchanges them for SPIFFE JWT-SVIDs.
-// This proxy should:
-//   - Validate incoming K8s service account tokens against the cluster's OIDC issuer
-//   - Map K8s service accounts to SPIFFE IDs
-//   - Call SPIRE's Workload API to obtain JWT-SVIDs
-//   - Return the JWT-SVID in RFC 8693 token exchange response format
-//
-// Example SPIFFE ID mapping:
-//
-//	K8s SA: system:serviceaccount:argocd:argocd-project-default
-//	     ↓
-//	SPIFFE ID: spiffe://example.org/ns/argocd/sa/argocd-project-default
-//
-// The proxy should expose an endpoint like:
-//
-//	POST /token
-//	Content-Type: application/x-www-form-urlencoded
-//
-//	grant_type=urn:ietf:params:oauth:grant-type:token-exchange
-//	&subject_token=<k8s-jwt>
-//	&subject_token_type=urn:ietf:params:oauth:token-type:jwt
-//	&audience=quay.example.org
-//
-// Response:
-//
-//	{
-//	    "access_token": "<spiffe-jwt-svid>",
-//	    "token_type": "Bearer",
-//	    "expires_in": 3600
-//	}
-//
-// ## Step 3: Configure Quay to Trust SPIRE OIDC
-//
-// In Quay's config.yaml, add SPIRE as an external OIDC provider:
-//
-//	FEATURE_DIRECT_LOGIN: true
-//	FEATURE_TEAM_SYNCING: true
-//
-//	# External OIDC configuration
-//	SPIRE_LOGIN_CONFIG:
-//	    CLIENT_ID: "quay.example.org"
-//	    CLIENT_SECRET: ""  # Not needed for JWT validation
-//	    OIDC_SERVER: "https://spire.example.org"
-//	    SERVICE_NAME: "SPIRE"
-//	    PREFERRED_USERNAME_CLAIM_NAME: "sub"
-//
-// For robot account mapping, configure Quay to map SPIFFE IDs to robot accounts
-// or use team sync with SPIFFE ID claims.
-//
-// ## Step 4: Create Kubernetes ServiceAccount
-//
-//	apiVersion: v1
-//	kind: ServiceAccount
-//	metadata:
-//	  name: argocd-project-default
-//	  namespace: argocd
-//	  annotations:
-//	    # SPIFFE ID that SPIRE will issue for this SA
-//	    spiffe.io/spiffe-id: "spiffe://example.org/ns/argocd/sa/argocd-project-default"
-//
-// ## Step 5: Create Repository Secret
-//
-//	apiVersion: v1
-//	kind: Secret
-//	metadata:
-//	  name: quay-repo
-//	  namespace: argocd
-//	  labels:
-//	    argocd.argoproj.io/secret-type: repository
-//	stringData:
-//	  type: helm
-//	  url: oci://quay.example.org/myorg/charts
-//	  project: default
-//	  useWorkloadIdentity: "true"
-//	  workloadIdentityProvider: "generic"
-//	  workloadIdentityTokenURL: "https://spire-proxy.example.org/token"
-//	  workloadIdentityAudience: "quay.example.org"
-//	  workloadIdentityRegistryAuthURL: "https://quay.example.org/v2/auth"
-//	  workloadIdentityRegistryService: "quay.example.org"
-//
-// ---
-//
-// # Option B: Direct K8s OIDC + Quay Setup (Simpler)
-//
-// This setup configures Quay to trust the Kubernetes cluster's OIDC issuer directly,
-// eliminating the need for SPIRE. Simpler to set up but without workload attestation.
-//
-// ## Architecture
-//
-//	┌─────────────────┐     ┌─────────────┐
-//	│ ArgoCD (K8s SA) │────▶│    Quay     │
-//	│    Token        │     │ (Registry)  │
-//	└─────────────────┘     └─────────────┘
-//	                               │
-//	                               ▼
-//	                        K8s OIDC Issuer
-//	                        (Token Validation)
-//
-// ## Step 1: Get Your Kubernetes OIDC Issuer URL
-//
-// For EKS:
-//
-//	aws eks describe-cluster --name $CLUSTER_NAME \
-//	    --query "cluster.identity.oidc.issuer" --output text
-//
-// For GKE:
-//
-//	# GKE clusters use this format:
-//	https://container.googleapis.com/v1/projects/<PROJECT>/locations/<LOCATION>/clusters/<CLUSTER>
-//
-// For self-managed clusters (kind, k3s, kubeadm):
-//
-//	kubectl get --raw /.well-known/openid-configuration | jq -r '.issuer'
-//
-// ## Step 2: Configure Quay to Trust K8s OIDC
-//
-// In Quay's config.yaml:
-//
-//	FEATURE_DIRECT_LOGIN: true
-//
-//	# Kubernetes OIDC configuration
-//	K8S_LOGIN_CONFIG:
-//	    CLIENT_ID: "<your-k8s-oidc-audience>"  # Often the cluster URL or custom audience
-//	    CLIENT_SECRET: ""
-//	    OIDC_SERVER: "<k8s-oidc-issuer-url>"
-//	    SERVICE_NAME: "Kubernetes"
-//	    PREFERRED_USERNAME_CLAIM_NAME: "sub"
-//	    # Map K8s SA subject to Quay identity
-//	    # Subject format: system:serviceaccount:<namespace>:<name>
-//
-// ## Step 3: Create Kubernetes ServiceAccount
-//
-//	apiVersion: v1
-//	kind: ServiceAccount
-//	metadata:
-//	  name: argocd-project-default
-//	  namespace: argocd
-//
-// ## Step 4: Create Repository Secret
-//
-//	apiVersion: v1
-//	kind: Secret
-//	metadata:
-//	  name: quay-repo
-//	  namespace: argocd
-//	  labels:
-//	    argocd.argoproj.io/secret-type: repository
-//	stringData:
-//	  type: helm
-//	  url: oci://quay.example.org/myorg/charts
-//	  project: default
-//	  useWorkloadIdentity: "true"
-//	  workloadIdentityProvider: "generic"
-//	  # No tokenURL needed - K8s token goes directly to registry
-//	  workloadIdentityAudience: "quay.example.org"
-//	  workloadIdentityRegistryAuthURL: "https://quay.example.org/v2/auth"
-//	  workloadIdentityRegistryService: "quay.example.org"
-//
-// Note: For Option B without tokenURL, the K8s token is used directly with the
-// registry auth endpoint. This requires Quay to validate the K8s token against
-// the cluster's OIDC issuer.
-//
-// ---
-//
-// # Harbor Setup (Alternative Registry)
-//
-// Harbor also supports OIDC authentication and can be configured similarly:
-//
-// ## Configure Harbor OIDC
-//
-// In Harbor's Administration > Configuration > Authentication:
-//   - Auth Mode: OIDC
-//   - OIDC Provider Name: Kubernetes (or SPIRE)
-//   - OIDC Endpoint: <oidc-issuer-url>
-//   - OIDC Client ID: harbor
-//   - OIDC Scope: openid
-//   - Verify Certificate: true
-//   - Automatic Onboarding: true
-//   - Username Claim: sub
-//
-// ## Repository Secret for Harbor
+// Configure Harbor to trust your Kubernetes cluster's OIDC issuer, then:
 //
 //	apiVersion: v1
 //	kind: Secret
@@ -264,10 +38,12 @@ package workloadidentity
 //	  url: oci://harbor.example.org/project/charts
 //	  project: default
 //	  useWorkloadIdentity: "true"
-//	  workloadIdentityProvider: "generic"
+//	  workloadIdentityProvider: "oidc"
 //	  workloadIdentityAudience: "harbor"
 //	  workloadIdentityRegistryAuthURL: "https://harbor.example.org/service/token"
 //	  workloadIdentityRegistryService: "harbor-registry"
+//
+// See docs/operator-manual/workload-identity-oidc-exchange.md for full documentation.
 
 import (
 	"context"
@@ -294,21 +70,18 @@ func httpClient(insecure bool) *http.Client {
 	return http.DefaultClient
 }
 
-// resolveGeneric resolves credentials for custom registries using RFC 8693 token exchange.
+// resolveOIDC resolves credentials using OIDC token exchange (RFC 8693) for custom registries.
 //
-// It supports three modes:
+// It supports two modes:
 //
-// 1. Two-step (SPIFFE/SPIRE): K8s token → Identity Provider → Registry
-//   - Requires: tokenURL, audience, registryAuthURL
-//
-// 2. Single-step with token exchange: K8s token → Token Exchange → Credentials
-//   - Requires: tokenURL, audience
-//   - The exchanged token is used directly as password
-//
-// 3. Direct registry auth (Option B): K8s token → Registry directly
+// 1. Direct K8s OIDC: K8s token → Registry
 //   - Requires: registryAuthURL (tokenURL not set)
 //   - K8s token is used directly with registry auth endpoint
-func (r *Resolver) resolveGeneric(ctx context.Context, sa *corev1.ServiceAccount, k8sToken, repoURL string, config *ProviderConfig) (*Credentials, error) {
+//
+// 2. Token Exchange: K8s token → Token Exchange → Registry
+//   - Requires: tokenURL, audience, registryAuthURL
+//   - For custom OIDC providers implementing RFC 8693
+func (r *Resolver) resolveOIDC(ctx context.Context, sa *corev1.ServiceAccount, k8sToken, repoURL string, config *ProviderConfig) (*Credentials, error) {
 	tokenURL := config.TokenURL
 	registryAuthURL := config.RegistryAuthURL
 
@@ -320,11 +93,11 @@ func (r *Resolver) resolveGeneric(ctx context.Context, sa *corev1.ServiceAccount
 		// Mode 1: Exchange K8s token for identity token via RFC 8693
 		audience := config.Audience
 		if audience == "" {
-			return nil, fmt.Errorf("workloadIdentityAudience not specified for generic provider with tokenURL")
+			return nil, fmt.Errorf("workloadIdentityAudience not specified for oidc provider with tokenURL")
 		}
 
 		// Exchange K8s JWT for identity token
-		identityToken, err = r.exchangeGenericToken(ctx, tokenURL, k8sToken, audience, config.Insecure)
+		identityToken, err = r.exchangeOIDCToken(ctx, tokenURL, k8sToken, audience, config.Insecure)
 		if err != nil {
 			return nil, fmt.Errorf("failed to exchange token: %w", err)
 		}
@@ -341,7 +114,7 @@ func (r *Resolver) resolveGeneric(ctx context.Context, sa *corev1.ServiceAccount
 
 	// No registry auth URL - need at least tokenURL for single-step exchange
 	if tokenURL == "" {
-		return nil, fmt.Errorf("either workloadIdentityTokenURL or workloadIdentityRegistryAuthURL must be specified for generic provider")
+		return nil, fmt.Errorf("either workloadIdentityTokenURL or workloadIdentityRegistryAuthURL must be specified for oidc provider")
 	}
 
 	// Use the exchanged token directly as password
@@ -352,8 +125,8 @@ func (r *Resolver) resolveGeneric(ctx context.Context, sa *corev1.ServiceAccount
 	}, nil
 }
 
-// exchangeGenericToken performs RFC 8693 OAuth 2.0 Token Exchange
-func (r *Resolver) exchangeGenericToken(ctx context.Context, tokenURL, subjectToken, audience string, insecure bool) (string, error) {
+// exchangeOIDCToken performs RFC 8693 OAuth 2.0 Token Exchange
+func (r *Resolver) exchangeOIDCToken(ctx context.Context, tokenURL, subjectToken, audience string, insecure bool) (string, error) {
 	// Prepare RFC 8693 token exchange request
 	data := url.Values{}
 	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")

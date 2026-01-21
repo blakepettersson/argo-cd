@@ -11,11 +11,11 @@ import (
 // Repository field names for workload identity configuration
 // These are stored in the Repository secret's data/stringData fields
 const (
-	FieldProvider        = "workloadIdentityProvider"        // e.g., "aws", "gcp", "azure", "generic"
+	FieldProvider        = "workloadIdentityProvider"        // e.g., "aws", "gcp", "azure", "spiffe", "oidc"
 	FieldTokenURL        = "workloadIdentityTokenURL"        // Optional: override default token endpoint
 	FieldAudience        = "workloadIdentityAudience"        // Optional: custom audience for token
-	FieldRegistryAuthURL  = "workloadIdentityRegistryAuthURL"  // Optional: registry auth endpoint for generic provider
-	FieldRegistryService  = "workloadIdentityRegistryService"  // Optional: registry service name for generic provider
+	FieldRegistryAuthURL  = "workloadIdentityRegistryAuthURL"  // Optional: registry auth endpoint for oidc provider
+	FieldRegistryService  = "workloadIdentityRegistryService"  // Optional: registry service name for oidc provider
 	FieldRegistryUsername = "workloadIdentityRegistryUsername" // Optional: registry username for Basic Auth (e.g., Quay robot account)
 
 	// Standard cloud provider annotation fields (on service accounts)
@@ -47,11 +47,11 @@ func NewResolver(clientset kubernetes.Interface, namespace string) *Resolver {
 
 // ProviderConfig holds workload identity provider configuration from the repository
 type ProviderConfig struct {
-	Provider         string // "aws", "gcp", "azure", or custom provider name
+	Provider         string // "aws", "gcp", "azure", "spiffe", or "oidc"
 	TokenURL         string // Optional: override default token endpoint
 	Audience         string // Optional: custom audience for token
-	RegistryAuthURL  string // Optional: registry auth endpoint (for generic provider)
-	RegistryService  string // Optional: registry service name (for generic provider)
+	RegistryAuthURL  string // Optional: registry auth endpoint (for oidc provider)
+	RegistryService  string // Optional: registry service name (for oidc provider)
 	RegistryUsername string // Optional: username for Basic Auth (e.g., Quay robot account "org+robot")
 	Insecure         bool   // Optional: skip TLS certificate verification
 }
@@ -63,7 +63,7 @@ type ProviderConfig struct {
 // The process is:
 // 1. Get K8s service account token via TokenRequest API
 // 2. Exchange token using the provider specified in the repository config
-// 3. If registry auth URL is set, do second exchange (for generic provider)
+// 3. If registry auth URL is set, do second exchange (for oidc provider)
 // 4. Return username/password for repo-server to use
 //
 // This works for any repository type (Git, Helm, OCI) as long as the token exchange
@@ -90,7 +90,7 @@ func (r *Resolver) ResolveCredentials(ctx context.Context, projectName, repoURL 
 
 	// Exchange based on provider
 	// Built-in providers (aws, gcp, azure, spiffe) have specific API calls they need to make
-	// "generic" uses RFC 8693 token exchange or direct K8s token
+	// "oidc" uses RFC 8693 token exchange or direct K8s token
 	switch config.Provider {
 	case "aws":
 		return r.resolveAWS(ctx, sa, k8sToken, repoURL, config)
@@ -100,9 +100,9 @@ func (r *Resolver) ResolveCredentials(ctx context.Context, projectName, repoURL 
 		return r.resolveAzure(ctx, sa, k8sToken, repoURL, config)
 	case "spiffe":
 		return r.resolveSPIFFE(ctx, sa, repoURL, config)
-	case "generic":
+	case "oidc":
 		// RFC 8693 token exchange or direct K8s OIDC
-		return r.resolveGeneric(ctx, sa, k8sToken, repoURL, config)
+		return r.resolveOIDC(ctx, sa, k8sToken, repoURL, config)
 	default:
 		return nil, fmt.Errorf("unsupported workload identity provider: %s", config.Provider)
 	}

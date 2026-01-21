@@ -4,7 +4,7 @@ This guide explains how to configure ArgoCD to use OIDC token exchange for workl
 
 ## Overview
 
-The OIDC exchange provider (configured as `"generic"`) enables ArgoCD to authenticate to container registries using:
+The OIDC provider (`workloadIdentityProvider: "oidc"`) enables ArgoCD to authenticate to container registries using:
 
 - **RFC 8693 OAuth 2.0 Token Exchange**: Exchange K8s JWT for an identity token
 - **Direct K8s OIDC**: Use K8s service account tokens directly with OIDC-enabled registries
@@ -73,7 +73,7 @@ The OIDC exchange provider supports three authentication modes:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `useWorkloadIdentity` | Yes | Set to `"true"` to enable |
-| `workloadIdentityProvider` | Yes | Set to `"generic"` (OIDC exchange) |
+| `workloadIdentityProvider` | Yes | Set to `"oidc"` |
 | `workloadIdentityTokenURL` | Mode 1,2 | RFC 8693 token exchange endpoint |
 | `workloadIdentityAudience` | Mode 1,2 | Audience for token exchange |
 | `workloadIdentityRegistryAuthURL` | Mode 1,3 | Docker Registry v2 auth endpoint |
@@ -157,7 +157,7 @@ stringData:
   url: oci://harbor.example.com/library/charts
   project: default
   useWorkloadIdentity: "true"
-  workloadIdentityProvider: "generic"
+  workloadIdentityProvider: "oidc"
   workloadIdentityAudience: "harbor"
   workloadIdentityRegistryAuthURL: "https://harbor.example.com/service/token"
   workloadIdentityRegistryService: "harbor-registry"
@@ -207,7 +207,7 @@ stringData:
   url: oci://quay.example.com/myorg/charts
   project: default
   useWorkloadIdentity: "true"
-  workloadIdentityProvider: "generic"
+  workloadIdentityProvider: "oidc"
   workloadIdentityAudience: "quay.example.com"
   workloadIdentityRegistryAuthURL: "https://quay.example.com/oauth2/federation/robot/token"
   workloadIdentityRegistryService: "quay.example.com"
@@ -245,7 +245,7 @@ stringData:
   url: oci://registry.example.com/charts
   project: default
   useWorkloadIdentity: "true"
-  workloadIdentityProvider: "generic"
+  workloadIdentityProvider: "oidc"
   # RFC 8693 token exchange endpoint
   workloadIdentityTokenURL: "https://idp.example.com/oauth2/token"
   workloadIdentityAudience: "registry.example.com"
@@ -277,7 +277,7 @@ stringData:
   url: oci://registry.gitlab.example.com/group/project
   project: default
   useWorkloadIdentity: "true"
-  workloadIdentityProvider: "generic"
+  workloadIdentityProvider: "oidc"
   workloadIdentityAudience: "gitlab"
   workloadIdentityRegistryAuthURL: "https://registry.gitlab.example.com/jwt/auth"
   workloadIdentityRegistryService: "container_registry"
@@ -307,7 +307,7 @@ stringData:
   url: oci://harbor.example.com/production/charts
   project: production
   useWorkloadIdentity: "true"
-  workloadIdentityProvider: "generic"
+  workloadIdentityProvider: "oidc"
   workloadIdentityAudience: "harbor"
   workloadIdentityRegistryAuthURL: "https://harbor.example.com/service/token"
 ---
@@ -330,7 +330,7 @@ stringData:
   url: oci://quay.example.com/staging/charts
   project: staging
   useWorkloadIdentity: "true"
-  workloadIdentityProvider: "generic"
+  workloadIdentityProvider: "oidc"
   workloadIdentityAudience: "quay.example.com"
   workloadIdentityRegistryAuthURL: "https://quay.example.com/oauth2/federation/robot/token"
   workloadIdentityRegistryUsername: "staging+argocd"
@@ -338,7 +338,7 @@ stringData:
 
 ## RFC 8693 Token Exchange Details
 
-The generic provider implements RFC 8693 OAuth 2.0 Token Exchange:
+The OIDC exchange provider implements RFC 8693 OAuth 2.0 Token Exchange:
 
 **Request:**
 ```http
@@ -395,7 +395,7 @@ The repository secret doesn't have the required configuration.
 - `workloadIdentityTokenURL` for token exchange
 - `workloadIdentityRegistryAuthURL` for direct registry auth
 
-### Error: "workloadIdentityAudience not specified for generic provider with tokenURL"
+### Error: "workloadIdentityAudience not specified for oidc provider with tokenURL"
 
 Token exchange requires an audience.
 

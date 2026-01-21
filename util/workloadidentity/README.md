@@ -63,7 +63,7 @@ This package provides a practical implementation of cloud-agnostic workload iden
    │  ├─ AWS: STS AssumeRole → ECR GetAuthToken
    │  ├─ GCP: STS token exchange → Access token
    │  ├─ Azure: OAuth flow → ACR refresh token
-   │  └─ Generic: RFC 8693 → Registry token
+   │  └─ OIDC: RFC 8693 → Registry token
    └─ Returns Credentials{Username, Password}
    ↓
 5. App Controller injects credentials into Repository
@@ -113,12 +113,11 @@ annotations:
   azure.workload.identity/tenant-id: "tenant-id-uuid"
 ```
 
-**Generic (SPIFFE/Harbor/Quay):**
+**OIDC (Harbor/Quay/GitLab):**
 ```yaml
 annotations:
-  argocd.argoproj.io/workload-identity-provider: "generic"
-  argocd.argoproj.io/workload-identity-token-url: "https://spire-oidc.example.com/token"
-  argocd.argoproj.io/workload-identity-audience: "spiffe://trust-domain/harbor"
+  argocd.argoproj.io/workload-identity-provider: "oidc"
+  argocd.argoproj.io/workload-identity-audience: "harbor"
   argocd.argoproj.io/workload-identity-registry-auth-url: "https://harbor.example.com/service/token"
   argocd.argoproj.io/workload-identity-registry-service: "harbor.example.com"
 ```
@@ -252,12 +251,12 @@ func TestResolverAWS(t *testing.T) {
 The implementation works with **all repository types**:
 
 - ✅ **OCI/Helm registries**: AWS ECR, GCP Artifact Registry, Azure ACR, Harbor, Quay, GitLab
-- ✅ **Git repositories**: GitHub, GitLab, Bitbucket (via generic provider + token exchange service)
-- ✅ **Traditional Helm repos**: HTTP/HTTPS repositories (via generic provider)
+- ✅ **Git repositories**: GitHub, GitLab, Bitbucket (via oidc provider + token exchange service)
+- ✅ **Traditional Helm repos**: HTTP/HTTPS repositories (via oidc provider)
 
 The abstraction is simple:
 1. Get K8s JWT via TokenRequest API
-2. Exchange with provider (built-in: AWS/GCP/Azure, or generic: RFC 8693)
+2. Exchange with provider (built-in: AWS/GCP/Azure, or oidc: RFC 8693)
 3. Return username/password that the repo-server uses transparently
 
 ## Future Enhancements
