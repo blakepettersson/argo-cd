@@ -16,7 +16,8 @@ last-updated: 2025-01-21
 
 # Workload Identity for Repository Authentication
 
-Enable ArgoCD to authenticate to container registries and Git repositories using cloud-native workload identity instead of static credentials.
+Enable ArgoCD to authenticate to container registries and Git repositories using cloud-native workload identity instead 
+of static credentials.
 
 ## Summary
 
@@ -55,29 +56,23 @@ implementations of it have a few issues.
 ### Goals
 
 1. **Eliminate static credentials**: Enable repository authentication without storing long-lived passwords or tokens in secrets.
-
 2. **Support major cloud providers**: Implement native support for:
    - AWS IRSA (IAM Roles for Service Accounts) for ECR
-   - GCP Workload Identity Federation for Artifact Registry/GCR
+   - GCP Workload Identity Federation for Artifact Registry
    - Azure Workload Identity for ACR
-
 3. **Support SPIFFE/SPIRE**: Enable workload identity using SPIFFE JWT-SVIDs with delegated identity for per-project isolation.
-
-4. **Support generic OIDC**: Enable authentication to any registry that supports OIDC federation (Harbor, Quay, GitLab, etc.) via RFC 8693 token exchange.
-
-5. **Per-project isolation**: Each ArgoCD project can use a different identity, allowing fine-grained access control at the cloud IAM level.
-
+4. **Support generic OIDC**: Enable authentication to any registry that supports OIDC federation (Harbor, Quay, GitLab, etc.)
+5. **Per-project isolation**: Each ArgoCD project can use a different identity, allowing fine-grained access control 
+at the cloud IAM level.
 6. **Backward compatibility**: Existing repositories with static credentials continue to work unchanged.
+7. **Git repository workload identity**: Where applicable, support that. At this time only Azure DevOps and AWS 
+CodeCommit will be supported.
 
 ### Non-Goals
 
-1. **Git repository workload identity**: While the architecture supports it, the initial implementation focuses on OCI/Helm registries. Git providers have varying OIDC support.
-
-2. **Credential caching**: Token caching with TTL management may be added in a future enhancement.
-
-3. **Automatic cloud IAM setup**: Users must configure cloud provider IAM roles/policies manually.
-
-4. **EKS Pod Identity support**: The implementation uses IRSA rather than the newer EKS Pod Identity because ArgoCD needs to assume different roles per project from a single pod.
+1. **Credential caching**: Token caching with TTL management may be added in a future enhancement.
+2. **Automatic cloud IAM setup**: Users must configure cloud provider IAM roles/policies manually.
+3. **EKS Pod Identity support**: The implementation uses IRSA rather than the newer EKS Pod Identity because ArgoCD needs to assume different roles per project from a single pod.
 
 ## Proposal
 
