@@ -1,4 +1,4 @@
-package workloadidentity
+package v2
 
 // # AWS IRSA (IAM Roles for Service Accounts) Setup
 //

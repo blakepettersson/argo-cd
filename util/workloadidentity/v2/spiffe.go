@@ -1,4 +1,4 @@
-package workloadidentity
+package v2
 
 import (
 	"context"

@@ -1,4 +1,4 @@
-package workloadidentity
+package v2
 
 import (
 	"context"
@@ -11,18 +11,18 @@ import (
 // Repository field names for workload identity configuration
 // These are stored in the Repository secret's data/stringData fields
 const (
-	FieldProvider        = "workloadIdentityProvider"        // e.g., "aws", "gcp", "azure", "spiffe", "oidc"
-	FieldTokenURL        = "workloadIdentityTokenURL"        // Optional: override default token endpoint
-	FieldAudience        = "workloadIdentityAudience"        // Optional: custom audience for token
+	FieldProvider         = "workloadIdentityProvider"         // e.g., "aws", "gcp", "azure", "spiffe", "oidc"
+	FieldTokenURL         = "workloadIdentityTokenURL"         // Optional: override default token endpoint
+	FieldAudience         = "workloadIdentityAudience"         // Optional: custom audience for token
 	FieldRegistryAuthURL  = "workloadIdentityRegistryAuthURL"  // Optional: registry auth endpoint for oidc provider
 	FieldRegistryService  = "workloadIdentityRegistryService"  // Optional: registry service name for oidc provider
 	FieldRegistryUsername = "workloadIdentityRegistryUsername" // Optional: registry username for Basic Auth (e.g., Quay robot account)
 
 	// Standard cloud provider annotation fields (on service accounts)
-	AnnotationAWSRoleARN     = "eks.amazonaws.com/role-arn"
-	AnnotationGCPSA          = "iam.gke.io/gcp-service-account"
-	AnnotationAzureClientID  = "azure.workload.identity/client-id"
-	AnnotationAzureTenantID  = "azure.workload.identity/tenant-id"
+	AnnotationAWSRoleARN    = "eks.amazonaws.com/role-arn"
+	AnnotationGCPSA         = "iam.gke.io/gcp-service-account"
+	AnnotationAzureClientID = "azure.workload.identity/client-id"
+	AnnotationAzureTenantID = "azure.workload.identity/tenant-id"
 )
 
 // Credentials holds resolved username and password for repository access

@@ -62,7 +62,7 @@
 // 2. Exchange the K8s token with GCP STS for a federated access token
 // 3. Use the federated token to impersonate the target GCP service account
 // 4. Return the access token for use with Artifact Registry/GCR
-package workloadidentity
+package v2
 
 import (
 	"bytes"

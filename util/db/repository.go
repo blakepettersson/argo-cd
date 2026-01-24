@@ -14,7 +14,7 @@ import (
 
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/util/settings"
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity"
+	workloadidentity "github.com/argoproj/argo-cd/v3/util/workloadidentity/v2"
 )
 
 const (

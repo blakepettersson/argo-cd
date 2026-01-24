@@ -1,4 +1,4 @@
-package workloadidentity
+package v2
 
 // # Azure Workload Identity Setup
 //
