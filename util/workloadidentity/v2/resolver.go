@@ -6,6 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 // Repository field names for workload identity configuration
@@ -33,15 +34,13 @@ type Credentials struct {
 
 // Resolver resolves workload identity credentials from Kubernetes service accounts
 type Resolver struct {
-	clientset kubernetes.Interface
-	namespace string
+	serviceAccounts v1.ServiceAccountInterface
 }
 
 // NewResolver creates a new workload identity resolver
 func NewResolver(clientset kubernetes.Interface, namespace string) *Resolver {
 	return &Resolver{
-		clientset: clientset,
-		namespace: namespace,
+		serviceAccounts: clientset.CoreV1().ServiceAccounts(namespace),
 	}
 }
 
@@ -77,7 +76,7 @@ func (r *Resolver) ResolveCredentials(ctx context.Context, projectName, repoURL 
 	saName := GetServiceAccountName(projectName)
 
 	// Get service account (for its identity and cloud provider role annotations)
-	sa, err := r.clientset.CoreV1().ServiceAccounts(r.namespace).Get(ctx, saName, metav1.GetOptions{})
+	sa, err := r.serviceAccounts.Get(ctx, saName, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get service account %s: %w", saName, err)
 	}

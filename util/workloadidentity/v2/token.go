@@ -25,7 +25,7 @@ func (r *Resolver) requestToken(ctx context.Context, sa *corev1.ServiceAccount, 
 		},
 	}
 
-	resp, err := r.clientset.CoreV1().ServiceAccounts(r.namespace).CreateToken(
+	resp, err := r.serviceAccounts.CreateToken(
 		ctx,
 		sa.Name,
 		tokenRequest,
