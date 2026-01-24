@@ -1,4 +1,6 @@
-// Package workloadidentity provides credential resolution for cloud provider workload identity.
+package identity
+
+// Package identity provides credential resolution for cloud provider workload identity.
 //
 // # GCP Workload Identity Setup
 //
@@ -62,7 +64,6 @@
 // 2. Exchange the K8s token with GCP STS for a federated access token
 // 3. Use the federated token to impersonate the target GCP service account
 // 4. Return the access token for use with Artifact Registry/GCR
-package v2
 
 import (
 	"bytes"
@@ -87,15 +88,37 @@ const (
 	GCPMetadataTokenURL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
 	// AnnotationGCPWorkloadIdentity is the annotation key for the Workload Identity Federation provider path
 	AnnotationGCPWorkloadIdentity = "iam.gke.io/workload-identity-provider"
+	AnnotationGCPSA               = "iam.gke.io/gcp-service-account"
 )
 
-// resolveGCP resolves GCP Artifact Registry/GCR credentials using Workload Identity Federation.
-//
-// For GKE with metadata server access, it first tries using the pod's own identity to impersonate
-// the target service account. If that fails (e.g., running locally or metadata server unavailable),
-// it falls back to STS token exchange using the Workload Identity Federation flow.
-func (r *Resolver) resolveGCP(ctx context.Context, sa *corev1.ServiceAccount, k8sToken string, config *ProviderConfig) (*Credentials, error) {
-	log.Infof("resolveGCP: SA=%s/%s, annotations=%v, config.Audience=%q", sa.Namespace, sa.Name, sa.Annotations, config.Audience)
+// GCPProvider exchanges K8s JWTs for AWS credentials via STS
+type GCPProvider struct {
+	repoURL string
+}
+
+func (p *GCPProvider) GetAudience(sa *corev1.ServiceAccount) string {
+	if audience := sa.Annotations[AnnotationGCPWorkloadIdentity]; audience != "" {
+		return audience
+	}
+
+	return "argocd"
+}
+
+func (p *GCPProvider) NeedsK8sToken() bool {
+	return true
+}
+
+// NewAWSProvider creates a new AWS identity provider
+func NewGCPProvider(repoURL string) *GCPProvider {
+	return &GCPProvider{
+		repoURL: repoURL,
+	}
+}
+
+// GetToken exchanges a K8s JWT for AWS credentials
+// Full implementation is in v2/aws.go - this extracts just the identity part
+func (p *GCPProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, k8sToken string, cfg *Config) (*Token, error) {
+	log.Infof("resolveGCP: SA=%s/%s, annotations=%v, config.GetAudience=%q", sa.Namespace, sa.Name, sa.Annotations, cfg.Audience)
 
 	// Get GCP service account from standard GKE annotation
 	gcpSA := sa.Annotations[AnnotationGCPSA]
@@ -106,25 +129,24 @@ func (r *Resolver) resolveGCP(ctx context.Context, sa *corev1.ServiceAccount, k8
 	log.Infof("resolveGCP: target gcpSA=%q", gcpSA)
 
 	// Try GKE metadata server first (works for GKE Workload Identity)
-	accessToken, err := r.resolveGCPViaMetadata(ctx, gcpSA)
+	accessToken, err := p.resolveGCPViaMetadata(ctx, gcpSA)
 	if err != nil {
 		log.Infof("resolveGCP: metadata server approach failed: %v, trying STS", err)
 		// Fall back to STS token exchange (for Workload Identity Federation)
-		accessToken, err = r.resolveGCPViaSTS(ctx, sa, k8sToken, gcpSA, config)
+		accessToken, err = p.resolveGCPViaSTS(ctx, sa, k8sToken, gcpSA, cfg)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// For GCR/Artifact Registry, the username is always "oauth2accesstoken"
-	return &Credentials{
-		Username: "oauth2accesstoken",
-		Password: accessToken,
+	return &Token{
+		Type:  TokenTypeBearer,
+		Token: accessToken,
 	}, nil
 }
 
 // resolveGCPViaMetadata uses the GKE metadata server to get a token, then impersonates the target SA
-func (r *Resolver) resolveGCPViaMetadata(ctx context.Context, targetSA string) (string, error) {
+func (p *GCPProvider) resolveGCPViaMetadata(ctx context.Context, targetSA string) (string, error) {
 	// Get token from metadata server (this is the pod's own GCP identity)
 	req, err := http.NewRequestWithContext(ctx, "GET", GCPMetadataTokenURL, nil)
 	if err != nil {
@@ -153,11 +175,11 @@ func (r *Resolver) resolveGCPViaMetadata(ctx context.Context, targetSA string) (
 	log.Infof("resolveGCPViaMetadata: got token from metadata server, impersonating %s", targetSA)
 
 	// Use this token to impersonate the target service account
-	return r.impersonateServiceAccount(ctx, tokenResp.AccessToken, targetSA)
+	return p.impersonateServiceAccount(ctx, tokenResp.AccessToken, targetSA)
 }
 
 // resolveGCPViaSTS uses STS token exchange for Workload Identity Federation
-func (r *Resolver) resolveGCPViaSTS(ctx context.Context, sa *corev1.ServiceAccount, k8sToken, gcpSA string, config *ProviderConfig) (string, error) {
+func (p *GCPProvider) resolveGCPViaSTS(ctx context.Context, sa *corev1.ServiceAccount, k8sToken, gcpSA string, config *Config) (string, error) {
 	// Get the workload identity provider audience
 	audience := config.Audience
 	if audience == "" {
@@ -170,17 +192,17 @@ func (r *Resolver) resolveGCPViaSTS(ctx context.Context, sa *corev1.ServiceAccou
 	log.Infof("resolveGCPViaSTS: using audience=%q", audience)
 
 	// Step 1: Exchange K8s token with GCP STS for a federated token
-	federatedToken, err := r.exchangeTokenWithSTS(ctx, k8sToken, audience, config.TokenURL)
+	federatedToken, err := p.exchangeTokenWithSTS(ctx, k8sToken, audience, config.TokenURL)
 	if err != nil {
 		return "", fmt.Errorf("STS token exchange failed: %w", err)
 	}
 
 	// Step 2: Use federated token to impersonate the GCP service account
-	return r.impersonateServiceAccount(ctx, federatedToken, gcpSA)
+	return p.impersonateServiceAccount(ctx, federatedToken, gcpSA)
 }
 
 // exchangeTokenWithSTS exchanges a K8s service account token for a GCP federated access token
-func (r *Resolver) exchangeTokenWithSTS(ctx context.Context, k8sToken, audience, tokenURL string) (string, error) {
+func (p *GCPProvider) exchangeTokenWithSTS(ctx context.Context, k8sToken, audience, tokenURL string) (string, error) {
 	if tokenURL == "" {
 		tokenURL = DefaultGCPSTSURL
 	}
@@ -223,7 +245,7 @@ func (r *Resolver) exchangeTokenWithSTS(ctx context.Context, k8sToken, audience,
 }
 
 // impersonateServiceAccount uses a federated token to get an access token for a GCP service account
-func (r *Resolver) impersonateServiceAccount(ctx context.Context, federatedToken, serviceAccountEmail string) (string, error) {
+func (p *GCPProvider) impersonateServiceAccount(ctx context.Context, federatedToken, serviceAccountEmail string) (string, error) {
 	impersonateURL := fmt.Sprintf(DefaultGCPIAMCredentialsURL, serviceAccountEmail)
 
 	requestBody := map[string]interface{}{
@@ -261,3 +283,6 @@ func (r *Resolver) impersonateServiceAccount(ctx context.Context, federatedToken
 
 	return tokenResp.AccessToken, nil
 }
+
+// Ensure GCPProvider implements Provider
+var _ Provider = (*GCPProvider)(nil)

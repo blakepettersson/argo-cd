@@ -1,4 +1,4 @@
-package v2
+package identity
 
 // # AWS IRSA (IAM Roles for Service Accounts) Setup
 //
@@ -122,20 +122,46 @@ package v2
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ecr"
-	"github.com/aws/aws-sdk-go/service/sts"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 )
 
-// resolveAWS resolves AWS ECR credentials using IRSA (IAM Roles for Service Accounts)
-func (r *Resolver) resolveAWS(ctx context.Context, sa *corev1.ServiceAccount, k8sToken, repoURL string, config *ProviderConfig) (*Credentials, error) {
+const (
+	// AnnotationAWSRoleARN is the EKS annotation for IAM role
+	AnnotationAWSRoleARN = "eks.amazonaws.com/role-arn"
+
+	// DefaultAWSAudience is the default STS audience
+	DefaultAWSAudience = "sts.amazonaws.com"
+)
+
+// AWSProvider exchanges K8s JWTs for AWS credentials via STS
+type AWSProvider struct {
+	repoURL string
+}
+
+func (p *AWSProvider) GetAudience(*corev1.ServiceAccount) string {
+	return DefaultAWSAudience
+}
+
+func (p *AWSProvider) NeedsK8sToken() bool {
+	return true
+}
+
+// NewAWSProvider creates a new AWS identity provider
+func NewAWSProvider(repoURL string) *AWSProvider {
+	return &AWSProvider{
+		repoURL: repoURL,
+	}
+}
+
+// GetToken exchanges a K8s JWT for AWS credentials
+func (p *AWSProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, k8sToken string, cfg *Config) (*Token, error) {
 	// Get role ARN from standard EKS annotation on service account
 	roleARN := sa.Annotations[AnnotationAWSRoleARN]
 	if roleARN == "" {
@@ -143,79 +169,70 @@ func (r *Resolver) resolveAWS(ctx context.Context, sa *corev1.ServiceAccount, k8
 	}
 
 	// Extract AWS region from ECR repository URL
-	region := extractAWSRegion(repoURL)
+	region := extractAWSRegion(p.repoURL)
+
+	log.WithFields(log.Fields{
+		"serviceAccount": sa.Name,
+		"roleARN":        roleARN,
+		"region":         region,
+	}).Info("AWS IRSA: assuming IAM role with web identity")
 
 	// Check for optional STS endpoint override (for GovCloud, China, etc.) from repository config
-	endpoint := config.TokenURL
-
-	// Create STS client configuration
-	awsConfig := &aws.Config{
-		Region: aws.String(region),
-	}
-	if endpoint != "" {
-		awsConfig.Endpoint = aws.String(endpoint)
+	stsEndpoint := cfg.TokenURL
+	if stsEndpoint != "" {
+		log.WithField("stsEndpoint", stsEndpoint).Debug("AWS IRSA: using custom STS endpoint")
 	}
 
-	// Create STS session
-	sess, err := session.NewSession(awsConfig)
+	// Load AWS config with region
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AWS session: %w", err)
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
-	stsClient := sts.New(sess)
+
+	// Create STS client with optional endpoint override
+	var stsOpts []func(*sts.Options)
+	if stsEndpoint != "" {
+		stsOpts = append(stsOpts, func(o *sts.Options) {
+			o.BaseEndpoint = aws.String(stsEndpoint)
+		})
+	}
+	stsClient := sts.NewFromConfig(awsCfg, stsOpts...)
 
 	// Assume role with web identity using the K8s JWT
 	roleSessionName := fmt.Sprintf("argocd-%s", sa.Name)
-	assumeResult, err := stsClient.AssumeRoleWithWebIdentityWithContext(ctx, &sts.AssumeRoleWithWebIdentityInput{
+	durationSeconds := int32(3600)
+	log.WithFields(log.Fields{
+		"roleSessionName": roleSessionName,
+	}).Debug("AWS IRSA: calling STS AssumeRoleWithWebIdentity")
+
+	assumeResult, err := stsClient.AssumeRoleWithWebIdentity(ctx, &sts.AssumeRoleWithWebIdentityInput{
 		RoleArn:          aws.String(roleARN),
 		WebIdentityToken: aws.String(k8sToken),
 		RoleSessionName:  aws.String(roleSessionName),
-		DurationSeconds:  aws.Int64(3600),
+		DurationSeconds:  &durationSeconds,
 	})
 	if err != nil {
+		log.WithFields(log.Fields{
+			"roleARN": roleARN,
+			"error":   err.Error(),
+		}).Error("AWS IRSA: failed to assume role")
 		return nil, fmt.Errorf("failed to assume role %s: %w", roleARN, err)
 	}
 
-	// Create ECR client with temporary credentials from STS
-	creds := credentials.NewStaticCredentials(
-		*assumeResult.Credentials.AccessKeyId,
-		*assumeResult.Credentials.SecretAccessKey,
-		*assumeResult.Credentials.SessionToken,
-	)
+	log.WithFields(log.Fields{
+		"roleARN":    roleARN,
+		"expiration": assumeResult.Credentials.Expiration,
+	}).Info("AWS IRSA: successfully assumed IAM role")
 
-	ecrSess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(region),
-		Credentials: creds,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ECR session: %w", err)
-	}
-	ecrClient := ecr.New(ecrSess)
-
-	// Get ECR authorization token
-	authResult, err := ecrClient.GetAuthorizationTokenWithContext(ctx, &ecr.GetAuthorizationTokenInput{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get ECR authorization token: %w", err)
-	}
-
-	if len(authResult.AuthorizationData) == 0 {
-		return nil, fmt.Errorf("no ECR authorization data returned")
-	}
-
-	// Decode the base64-encoded authorization token
-	decoded, err := base64.StdEncoding.DecodeString(*authResult.AuthorizationData[0].AuthorizationToken)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode ECR authorization token: %w", err)
-	}
-
-	// ECR token format is "username:password"
-	parts := strings.SplitN(string(decoded), ":", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid ECR authorization token format")
-	}
-
-	return &Credentials{
-		Username: parts[0],
-		Password: parts[1],
+	return &Token{
+		Type: TokenTypeAWS,
+		AWSCredentials: &AWSCredentials{
+			AccessKeyID:     *assumeResult.Credentials.AccessKeyId,
+			SecretAccessKey: *assumeResult.Credentials.SecretAccessKey,
+			SessionToken:    *assumeResult.Credentials.SessionToken,
+			Expiration:      assumeResult.Credentials.Expiration,
+			Region:          awsCfg.Region,
+		},
 	}, nil
 }
 
@@ -234,3 +251,6 @@ func extractAWSRegion(repoURL string) string {
 	// Default to us-east-1 if we can't parse the region
 	return "us-east-1"
 }
+
+// Ensure AWSProvider implements Provider
+var _ Provider = (*AWSProvider)(nil)
