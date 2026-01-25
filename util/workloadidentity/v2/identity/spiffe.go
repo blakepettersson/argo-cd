@@ -3,8 +3,10 @@ package identity
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 
+	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 	log "github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
@@ -19,37 +21,43 @@ const (
 	SpiffeEndpointSocketEnv = "SPIFFE_ENDPOINT_SOCKET"
 )
 
-// SPIFFEProvider fetches SPIFFE JWTs from the Workload API
+// SPIFFEProvider fetches SPIFFE JWTs from the Workload API.
+// Unlike other providers, SPIFFE uses its own attestation mechanism
+// and does not require a K8s service account token.
 type SPIFFEProvider struct {
 	// SocketPath overrides the default SPIFFE socket path
 	SocketPath string
+	// repoURL is used to derive default audience from registry host
+	repoURL string
 }
 
-func (p *SPIFFEProvider) GetAudience(*corev1.ServiceAccount) string {
-	return ""
-}
-
-func (p *SPIFFEProvider) NeedsK8sToken() bool {
-	return false
+func (p *SPIFFEProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
+	return repository.NewHTTPTemplateAuthenticator()
 }
 
 // NewSPIFFEProvider creates a new SPIFFE identity provider
-func NewSPIFFEProvider() *SPIFFEProvider {
-	return &SPIFFEProvider{}
+func NewSPIFFEProvider(repoURL string) *SPIFFEProvider {
+	return &SPIFFEProvider{
+		repoURL: repoURL,
+	}
 }
 
-// Name returns the provider identifier
-func (p *SPIFFEProvider) Name() string {
-	return "spiffe"
-}
-
-// GetToken fetches a SPIFFE JWT-SVID for the given audience
-func (p *SPIFFEProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, _ string, config *Config) (*Token, error) {
-	// k8sToken is not used - SPIFFE uses its own attestation
+// GetToken fetches a SPIFFE JWT-SVID for the given audience.
+// Note: requestToken is not used - SPIFFE uses its own attestation.
+func (p *SPIFFEProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, _ TokenRequester, config *Config) (*repository.Token, error) {
+	// SPIFFE uses its own workload attestation, not K8s tokens
 
 	audience := config.Audience
 	if audience == "" {
-		return nil, fmt.Errorf("workloadIdentityAudience is required for spiffe provider")
+		// Default to registry host from repo URL
+		if p.repoURL != "" {
+			if u, err := url.Parse(p.repoURL); err == nil && u.Host != "" {
+				audience = u.Host
+			}
+		}
+	}
+	if audience == "" {
+		return nil, fmt.Errorf("could not determine audience: set workloadIdentityAudience or provide a valid repo URL")
 	}
 
 	log.WithFields(log.Fields{
@@ -82,8 +90,8 @@ func (p *SPIFFEProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount
 		"audience": audience,
 	}).Info("SPIFFE: successfully obtained JWT-SVID")
 
-	return &Token{
-		Type:  TokenTypeBearer,
+	return &repository.Token{
+		Type:  repository.TokenTypeBearer,
 		Token: jwtToken,
 	}, nil
 }
@@ -169,3 +177,6 @@ func fetchSPIFFEJWT(ctx context.Context, audience string, subjectSPIFFEID spiffe
 
 	return svid.Marshal(), nil
 }
+
+// Ensure SPIFFEProvider implements Provider
+var _ Provider = (*SPIFFEProvider)(nil)

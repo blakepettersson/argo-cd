@@ -8,7 +8,6 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/identity"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
@@ -24,8 +23,8 @@ func NewECRAuthenticator() *ECRAuthenticator {
 }
 
 // Authenticate exchanges AWS credentials for ECR credentials
-func (a *ECRAuthenticator) Authenticate(ctx context.Context, token *identity.Token, repoURL string, cfg *Config) (*Credentials, error) {
-	if token.Type != identity.TokenTypeAWS {
+func (a *ECRAuthenticator) Authenticate(ctx context.Context, token *Token, repoURL string, cfg *Config) (*Credentials, error) {
+	if token.Type != TokenTypeAWS {
 		return nil, fmt.Errorf("ecr authenticator requires AWS credentials, got %s", token.Type)
 	}
 

@@ -2,8 +2,6 @@ package repository
 
 import (
 	"context"
-
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/identity"
 )
 
 // Credentials holds resolved username and password for repository access
@@ -14,28 +12,45 @@ type Credentials struct {
 
 // Config holds registry-specific configuration
 type Config struct {
-	// AuthURL is the registry's authentication endpoint
-	// e.g., "https://quay.io/v2/auth" or "https://registry.example.com/v2/token"
-	// If not set, Docker authenticator will try to discover it via WWW-Authenticate
-	AuthURL string
-
-	// Service is the registry service name (for Docker token auth)
-	// e.g., "registry.docker.io"
-	// If not set, defaults to the registry hostname
-	Service string
-
-	// Scope defines the access scope for Docker v2 token auth
-	// Format: "repository:namespace/repo:pull,push"
-	// Multiple scopes can be space-separated
-	// If not set, registry grants default access (usually pull-only)
-	Scope string
-
-	// Username for basic auth (when using token as password)
-	// e.g., "oauth2accesstoken" for GCR, "$oauthtoken" for Quay
+	// Username for credentials (e.g., "oauth2accesstoken" for GCR, "$oauthtoken" for Quay)
+	// Default: "$oauthtoken"
 	Username string
 
 	// Insecure skips TLS certificate verification
 	Insecure bool
+
+	// AuthHost overrides the registry host for the auth request URL.
+	// Use this when the auth endpoint is on a different host than the registry.
+	// e.g., for octo-sts: registry is ghcr.io but auth is at octo-sts.dev
+	AuthHost string
+
+	// Method is the HTTP method for template-based auth (GET or POST)
+	// Default: GET
+	Method string
+
+	// PathTemplate is a URL path template with placeholders
+	// e.g., "/v2/auth?service={registry}&scope={scope}"
+	// Available variables: {token}, {registry}, {repo}, plus custom Params
+	PathTemplate string
+
+	// BodyTemplate is the request body template for POST requests
+	// Can be form-urlencoded or JSON (auto-detected by leading '{')
+	// e.g., "grant_type=access_token&access_token={token}"
+	BodyTemplate string
+
+	// AuthType specifies how to send the identity token
+	// - "bearer": Authorization: Bearer {token} (default)
+	// - "basic": Basic auth with Username:{token}
+	// - "none": Token only sent via template placeholders
+	AuthType string
+
+	// Params are custom parameters for template substitution
+	// e.g., {"policy": "argocd", "provider": "my-oidc"}
+	Params map[string]string
+
+	// ResponseTokenField is the JSON field containing the token in the response
+	// Default: tries "access_token", then "token", then "refresh_token"
+	ResponseTokenField string
 }
 
 // Authenticator converts identity tokens to registry credentials
@@ -49,5 +64,5 @@ type Authenticator interface {
 	//   - config: Authenticator configuration
 	//
 	// Returns credentials that can be used to access the registry
-	Authenticate(ctx context.Context, token *identity.Token, repoURL string, config *Config) (*Credentials, error)
+	Authenticate(ctx context.Context, token *Token, repoURL string, config *Config) (*Credentials, error)
 }

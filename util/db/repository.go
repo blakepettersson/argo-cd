@@ -96,7 +96,7 @@ func (db *db) GetRepository(ctx context.Context, repoURL, project string) (*v1al
 	}
 
 	// Resolve workload identity credentials if enabled
-	if repository.UseWorkloadIdentity {
+	if repository.WorkloadIdentityProvider != "" {
 		if err := db.enrichWorkloadIdentity(ctx, repository); err != nil {
 			return repository, fmt.Errorf("unable to resolve workload identity for repository %q: %w", repoURL, err)
 		}
@@ -476,26 +476,21 @@ func (db *db) enrichWriteCredsToRepo(ctx context.Context, repository *v1alpha1.R
 
 // enrichWorkloadIdentity resolves workload identity credentials and injects them into the repository
 func (db *db) enrichWorkloadIdentity(ctx context.Context, repository *v1alpha1.Repository) error {
-	// Extract provider configuration from repository fields
-	config := &workloadidentity.ProviderConfig{
-		Provider:         repository.WorkloadIdentityProvider,
-		TokenURL:         repository.WorkloadIdentityTokenURL,
-		Audience:         repository.WorkloadIdentityAudience,
-		RegistryAuthURL:  repository.WorkloadIdentityRegistryAuthURL,
-		RegistryService:  repository.WorkloadIdentityRegistryService,
-		RegistryUsername: repository.WorkloadIdentityRegistryUsername,
-		Insecure:         repository.Insecure,
-	}
-
 	// Create workload identity resolver
 	resolver := workloadidentity.NewResolver(db.kubeclientset, db.ns)
+
+	// Create workload identity resolver
+	provider := workloadidentity.NewIdentityProvider(repository)
+
+	// TODO: Add ability to choose authenticator from the repository?
+	authenticator := provider.DefaultRepositoryAuthenticator()
 
 	// Resolve credentials from service account
 	// The resolver will:
 	// 1. Get K8s token via TokenRequest API for project service account
 	// 2. Exchange token with provider specified in repository config
 	// 3. Return username/password
-	creds, err := resolver.ResolveCredentials(ctx, repository.Project, repository.Repo, config)
+	creds, err := resolver.ResolveCredentials(ctx, provider, authenticator, repository)
 	if err != nil {
 		return fmt.Errorf("failed to resolve workload identity credentials: %w", err)
 	}
@@ -504,7 +499,7 @@ func (db *db) enrichWorkloadIdentity(ctx context.Context, repository *v1alpha1.R
 	repository.Username = creds.Username
 	repository.Password = creds.Password
 
-	log.Debugf("Successfully resolved workload identity credentials for repository %q using provider %q", repository.Repo, config.Provider)
+	log.Debugf("Successfully resolved workload identity credentials for repository %q using provider %q", repository.Repo, repository.WorkloadIdentityProvider)
 
 	return nil
 }

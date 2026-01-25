@@ -2,45 +2,16 @@ package identity
 
 import (
 	"context"
-	"time"
 
+	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 	corev1 "k8s.io/api/core/v1"
 )
 
-// TokenType indicates the format of the identity token
-type TokenType string
-
-const (
-	// TokenTypeBearer is a bearer token (JWT, OAuth access token)
-	TokenTypeBearer TokenType = "bearer"
-	// TokenTypeAWS is AWS credentials for SigV4 signing
-	TokenTypeAWS TokenType = "aws"
-)
-
-// Token represents a token from an identity provider
-type Token struct {
-	// Type indicates the token format
-	Type TokenType
-
-	// Token holds the bearer token value (for TokenTypeBearer)
-	Token string
-
-	// AWSCredentials holds AWS credentials (for TokenTypeAWS)
-	AWSCredentials *AWSCredentials
-}
-
-// AWSCredentials holds AWS temporary credentials
-type AWSCredentials struct {
-	AccessKeyID     string
-	SecretAccessKey string
-	SessionToken    string
-	Region          string
-	Expiration      *time.Time
-}
-
 // Config holds identity provider configuration
 type Config struct {
-	// Audience for the token request
+	// Audience overrides the provider's default audience for token requests
+	// If empty, the provider uses its own default (e.g., "sts.amazonaws.com" for AWS,
+	// registry host for SPIFFE, "kubernetes.default.svc" for K8s)
 	Audience string
 
 	// TokenURL is a custom token endpoint (overrides provider default)
@@ -50,20 +21,23 @@ type Config struct {
 	Insecure bool
 }
 
+// TokenRequester requests a K8s service account token with the specified audience.
+// This is passed to providers so they can request tokens with the audience they need.
+type TokenRequester func(ctx context.Context, audience string) (string, error)
+
 // Provider acquires identity tokens from a platform
 type Provider interface {
-	NeedsK8sToken() bool
-
-	GetAudience(*corev1.ServiceAccount) string
-
 	// GetToken exchanges K8s SA context for a platform identity token
 	//
 	// Parameters:
 	//   - ctx: Context for cancellation
-	//   - sa: The Kubernetes service account (for annotations)
-	//   - k8sToken: A K8s service account JWT (may be empty if not needed)
+	//   - sa: The Kubernetes service account (for annotations like role ARN)
+	//   - requestToken: Function to request a K8s token with a specific audience
 	//   - config: Provider configuration
 	//
-	// Returns an identity token that can be used by a RegistryAuthenticator
-	GetToken(ctx context.Context, sa *corev1.ServiceAccount, k8sToken string, config *Config) (*Token, error)
+	// The provider calls requestToken with the audience it needs (e.g., "sts.amazonaws.com").
+	// Returns an identity token that can be used by a RepositoryAuthenticator.
+	GetToken(ctx context.Context, sa *corev1.ServiceAccount, requestToken TokenRequester, config *Config) (*repository.Token, error)
+
+	DefaultRepositoryAuthenticator() repository.Authenticator
 }

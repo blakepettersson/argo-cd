@@ -75,6 +75,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -87,26 +89,25 @@ const (
 
 // AzureProvider exchanges K8s JWTs for Azure credentials via STS
 type AzureProvider struct {
-	repoURL string
+	repo *v1alpha1.Repository
 }
 
-func (p *AzureProvider) GetAudience(*corev1.ServiceAccount) string {
-	return DefaultAzureAudience
-}
-
-func (p *AzureProvider) NeedsK8sToken() bool {
-	return true
+func (p *AzureProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
+	if p.repo.Type == "git" {
+		return repository.NewPassthroughAuthenticator()
+	}
+	return repository.NewACRAuthenticator()
 }
 
 // NewAzureProvider creates a new Azure identity provider
-func NewAzureProvider(repoURL string) *AzureProvider {
+func NewAzureProvider(repo *v1alpha1.Repository) *AzureProvider {
 	return &AzureProvider{
-		repoURL: repoURL,
+		repo: repo,
 	}
 }
 
 // GetToken exchanges a K8s JWT for Azure credentials
-func (p *AzureProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, k8sToken string, cfg *Config) (*Token, error) {
+func (p *AzureProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, requestToken TokenRequester, cfg *Config) (*repository.Token, error) {
 	// Get Azure client ID and tenant ID from standard Azure Workload Identity annotations on service account
 	clientID := sa.Annotations[AnnotationAzureClientID]
 	if clientID == "" {
@@ -124,6 +125,18 @@ func (p *AzureProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount,
 		"tenantID":       tenantID,
 	}).Info("Azure Workload Identity: exchanging K8s token for Azure access token")
 
+	// Use configured audience or default to Azure AD token exchange
+	audience := cfg.Audience
+	if audience == "" {
+		audience = DefaultAzureAudience
+	}
+
+	// Request K8s token with Azure audience
+	k8sToken, err := requestToken(ctx, audience)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request K8s token: %w", err)
+	}
+
 	// Get OAuth endpoint (allow override for sovereign clouds) from repository config
 	tokenURL := cfg.TokenURL
 	if tokenURL == "" {
@@ -134,7 +147,7 @@ func (p *AzureProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount,
 		log.WithField("tokenURL", tokenURL).Debug("Azure Workload Identity: using custom token endpoint")
 	}
 
-	// Step 1: Exchange K8s JWT for Azure access token using client credentials flow
+	// Exchange K8s JWT for Azure access token using client credentials flow
 	log.Debug("Azure Workload Identity: requesting access token from Azure AD")
 	azureToken, err := p.getAzureAccessToken(ctx, tokenURL, clientID, k8sToken)
 	if err != nil {
@@ -151,10 +164,17 @@ func (p *AzureProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount,
 		"tenantID": tenantID,
 	}).Info("Azure Workload Identity: successfully obtained access token")
 
-	return &Token{
-		Type:  TokenTypeBearer,
+	token := &repository.Token{
+		Type:  repository.TokenTypeBearer,
 		Token: azureToken,
-	}, nil
+	}
+
+	// For git repos (Azure DevOps), set the username for passthrough auth
+	if p.repo.Type == "git" {
+		token.Username = "oauth"
+	}
+
+	return token, nil
 }
 
 // getAzureAccessToken exchanges a K8s JWT for an Azure access token

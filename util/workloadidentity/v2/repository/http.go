@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -9,151 +10,203 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"text/template"
 
+	"github.com/Masterminds/sprig/v3"
 	log "github.com/sirupsen/logrus"
-
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/identity"
 )
 
-// HTTPAuthenticator exchanges an identity token for registry credentials via HTTP.
-// It supports both Bearer and Basic auth modes, making it suitable for registries
-// that accept JWT tokens through either mechanism:
+// templateFuncMap contains sprig functions plus custom helpers for templating.
+// Initialized once for performance.
+var templateFuncMap template.FuncMap
+
+// baseGoTemplate is a pre-initialized template with all functions loaded.
+// Cloning this is faster than calling Funcs() on a new template each time.
+var baseGoTemplate *template.Template
+
+func init() {
+	templateFuncMap = sprig.TxtFuncMap()
+	// Remove potentially dangerous functions
+	delete(templateFuncMap, "env")
+	delete(templateFuncMap, "expandenv")
+	delete(templateFuncMap, "getHostByName")
+
+	baseGoTemplate = template.New("base").Funcs(templateFuncMap)
+}
+
+// HTTPTemplateAuthenticator exchanges identity tokens for credentials using
+// configurable HTTP request templates. This allows integration with various
+// token exchange endpoints (OAuth 2.0, OIDC, custom APIs) without requiring
+// provider-specific code.
 //
-//   - Basic Auth: When Username is configured, sends username:token as Basic Auth.
-//     Used by Quay robot account federation, where the JWT is sent as the password.
+// Templates use Go template syntax with Sprig functions available.
+// Built-in variables: .token, .registry, .repo, plus any custom .params
 //
-//   - Bearer Auth: When Username is not set, sends the token as a Bearer header.
-//     Used by registries that accept OIDC/JWT tokens directly as Bearer credentials.
+// Example configurations:
 //
-// The auth URL can be configured explicitly or discovered via WWW-Authenticate.
-type HTTPAuthenticator struct {
+//	# Octo-STS (GitHub tokens from OIDC)
+//	method: GET
+//	pathTemplate: "/sts/exchange?scope={{ .repo }}&identity={{ .policy }}"
+//	params:
+//	  policy: "argocd"
+//
+//	# ACR token exchange
+//	method: POST
+//	pathTemplate: "/oauth2/exchange"
+//	bodyTemplate: "grant_type=access_token&service={{ .registry }}&access_token={{ .token }}"
+//	authType: none
+//	responseTokenField: refresh_token
+//
+//	# JFrog OIDC token exchange
+//	method: POST
+//	pathTemplate: "/access/api/v1/oidc/token"
+//	bodyTemplate: '{"grant_type":"urn:ietf:params:oauth:grant-type:token-exchange","subject_token":"{{ .token }}","provider_name":"{{ .provider }}"}'
+//	authType: none
+//	params:
+//	  provider: "my-oidc-provider"
+type HTTPTemplateAuthenticator struct {
 	HTTPClient *http.Client
 }
 
-func NewHTTPAuthenticator() *HTTPAuthenticator {
-	return &HTTPAuthenticator{}
+// NewHTTPTemplateAuthenticator creates a new template-based HTTP authenticator
+func NewHTTPTemplateAuthenticator() *HTTPTemplateAuthenticator {
+	return &HTTPTemplateAuthenticator{}
 }
 
-func (a *HTTPAuthenticator) Name() string {
-	return "http"
-}
-
-func (a *HTTPAuthenticator) Authenticate(ctx context.Context, token *identity.Token, repoURL string, config *Config) (*Credentials, error) {
-	if token.Type != identity.TokenTypeBearer {
-		return nil, fmt.Errorf("http authenticator requires a bearer token, got %s", token.Type)
+// Authenticate exchanges an identity token for registry credentials using HTTP templates
+func (a *HTTPTemplateAuthenticator) Authenticate(ctx context.Context, token *Token, repoURL string, config *Config) (*Credentials, error) {
+	if token.Type != TokenTypeBearer {
+		return nil, fmt.Errorf("http template authenticator requires a bearer token, got %s", token.Type)
 	}
 	if token.Token == "" {
 		return nil, fmt.Errorf("empty bearer token")
 	}
-
-	registry := extractRegistryHost(repoURL)
-
-	// Resolve auth URL
-	authURL := config.AuthURL
-	if authURL == "" {
-		log.WithField("registry", registry).Debug("HTTP: auth URL not configured, discovering via WWW-Authenticate")
-		discovered, err := discoverAuthURL(ctx, repoURL, a.getHTTPClient(config.Insecure), config.Insecure)
-		if err != nil {
-			return nil, fmt.Errorf("auth URL not configured and discovery failed: %w", err)
-		}
-		authURL = discovered
-		log.WithField("authURL", authURL).Debug("HTTP: discovered auth URL")
+	if config.PathTemplate == "" {
+		return nil, fmt.Errorf("pathTemplate is required for HTTP template authenticator")
 	}
 
-	// Build request URL with query params
-	reqURL, err := url.Parse(authURL)
+	// Parse repo URL to extract registry and path
+	registry, repoPath, err := parseRepoURL(repoURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid auth URL: %w", err)
+		return nil, fmt.Errorf("failed to parse repo URL: %w", err)
 	}
 
-	q := reqURL.Query()
-
-	service := config.Service
-	if service == "" {
-		service = registry
+	// Build template variables
+	vars := map[string]string{
+		"token":    token.Token,
+		"registry": registry,
+		"repo":     repoPath,
 	}
-	q.Set("service", service)
+	// Add custom params
+	for k, v := range config.Params {
+		vars[k] = v
+	}
 
-	if config.Scope != "" {
-		for _, scope := range strings.Split(config.Scope, " ") {
-			scope = strings.TrimSpace(scope)
-			if scope != "" {
-				q.Add("scope", scope)
-			}
+	// Determine scheme
+	scheme := "https"
+	if config.Insecure {
+		scheme = "http"
+	}
+
+	// Build the full URL
+	path, err := substituteTemplate(config.PathTemplate, vars)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render path template: %w", err)
+	}
+
+	// Use AuthHost if specified, otherwise use registry from repo URL
+	host := registry
+	if config.AuthHost != "" {
+		host = config.AuthHost
+	}
+	fullURL := fmt.Sprintf("%s://%s%s", scheme, host, path)
+
+	// Determine HTTP method
+	method := strings.ToUpper(config.Method)
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	// Build request body if template provided
+	var bodyReader io.Reader
+	var contentType string
+	if config.BodyTemplate != "" {
+		body, err := substituteTemplate(config.BodyTemplate, vars)
+		if err != nil {
+			return nil, fmt.Errorf("failed to render body template: %w", err)
 		}
-	} else {
-		// Build default scope from repo URL
-		scope := buildRegistryScope(repoURL)
-		if scope != "" {
-			q.Add("scope", scope)
+		bodyReader = strings.NewReader(body)
+
+		// Auto-detect content type
+		trimmed := strings.TrimSpace(config.BodyTemplate)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			contentType = "application/json"
+		} else {
+			contentType = "application/x-www-form-urlencoded"
 		}
 	}
-
-	reqURL.RawQuery = q.Encode()
 
 	log.WithFields(log.Fields{
-		"url":      reqURL.String(),
-		"insecure": config.Insecure,
-	}).Info("HTTP: requesting token from auth endpoint")
+		"url":      fullURL,
+		"method":   method,
+		"authType": config.AuthType,
+	}).Info("HTTPTemplate: making token exchange request")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
+	// Create request
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set auth header based on whether username is configured
-	if config.Username != "" {
-		// Basic Auth: username + JWT as password (e.g., Quay robot account federation)
-		req.SetBasicAuth(config.Username, token.Token)
-		log.WithFields(log.Fields{
-			"registry":    registry,
-			"username":    config.Username,
-			"tokenLength": len(token.Token),
-		}).Info("HTTP: using Basic Auth with identity token as password")
-	} else {
-		// Bearer Auth: send JWT directly
-		req.Header.Set("Authorization", "Bearer "+token.Token)
-		log.WithField("registry", registry).Info("HTTP: using Bearer Auth with identity token")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 
+	// Set authentication based on authType
+	authType := strings.ToLower(config.AuthType)
+	switch authType {
+	case "basic":
+		if config.Username == "" {
+			return nil, fmt.Errorf("username is required for basic auth")
+		}
+		req.SetBasicAuth(config.Username, token.Token)
+	case "none":
+		// Token is only in the template, no Authorization header
+	case "bearer", "":
+		// Default: Bearer token in header
+		req.Header.Set("Authorization", "Bearer "+token.Token)
+	default:
+		return nil, fmt.Errorf("unknown authType: %s", authType)
+	}
+
+	// Execute request
 	client := a.getHTTPClient(config.Insecure)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("token request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		log.WithFields(log.Fields{
-			"registry":   registry,
 			"statusCode": resp.StatusCode,
-		}).Error("HTTP: token request failed")
-		return nil, fmt.Errorf("token request failed with status %d: %s", resp.StatusCode, string(body))
+			"body":       truncateString(string(respBody), 200),
+		}).Error("HTTPTemplate: request failed")
+		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, truncateString(string(respBody), 200))
 	}
 
-	// Parse response — Docker v2 spec uses "token" or "access_token"
-	var tokenResp struct {
-		Token       string `json:"token"`
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	// Parse response to extract token
+	accessToken, err := extractTokenFromResponse(respBody, config.ResponseTokenField)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract token from response: %w", err)
 	}
 
-	accessToken := tokenResp.Token
-	if accessToken == "" {
-		accessToken = tokenResp.AccessToken
-	}
-	if accessToken == "" {
-		return nil, fmt.Errorf("no token in response")
-	}
-
-	// Use the configured username for the returned credentials, or fall back to $oauthtoken
+	// Determine username for credentials
 	username := config.Username
 	if username == "" {
 		username = "$oauthtoken"
@@ -162,7 +215,7 @@ func (a *HTTPAuthenticator) Authenticate(ctx context.Context, token *identity.To
 	log.WithFields(log.Fields{
 		"registry": registry,
 		"username": username,
-	}).Info("HTTP: successfully obtained registry token")
+	}).Info("HTTPTemplate: successfully obtained credentials")
 
 	return &Credentials{
 		Username: username,
@@ -170,7 +223,72 @@ func (a *HTTPAuthenticator) Authenticate(ctx context.Context, token *identity.To
 	}, nil
 }
 
-func (a *HTTPAuthenticator) getHTTPClient(insecure bool) *http.Client {
+// substituteTemplate executes a Go template with the provided variables.
+// Templates use Go template syntax: {{ .token }}, {{ .registry | urlquery }}, etc.
+// All Sprig functions are available (except env, expandenv, getHostByName).
+func substituteTemplate(tmplStr string, vars map[string]string) (string, error) {
+	// Clone the base template which has sprig funcs pre-loaded
+	cloned, err := baseGoTemplate.Clone()
+	if err != nil {
+		return "", fmt.Errorf("failed to clone base template: %w", err)
+	}
+
+	parsed, err := cloned.Parse(tmplStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := parsed.Execute(&buf, vars); err != nil {
+		return "", fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
+// extractTokenFromResponse extracts the token from a JSON response
+func extractTokenFromResponse(body []byte, fieldName string) (string, error) {
+	var data map[string]interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return "", fmt.Errorf("failed to parse JSON response: %w", err)
+	}
+
+	// If specific field requested, use it
+	if fieldName != "" {
+		if val, ok := data[fieldName]; ok {
+			if strVal, ok := val.(string); ok && strVal != "" {
+				return strVal, nil
+			}
+		}
+		return "", fmt.Errorf("field %q not found or empty in response", fieldName)
+	}
+
+	// Try common field names in order
+	for _, field := range []string{"access_token", "token", "refresh_token"} {
+		if val, ok := data[field]; ok {
+			if strVal, ok := val.(string); ok && strVal != "" {
+				return strVal, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no token field found in response (tried access_token, token, refresh_token)")
+}
+
+// parseRepoURL parses a repository URL and extracts the registry host and path.
+// e.g., "oci://quay.io/myorg/myrepo" -> ("quay.io", "myorg/myrepo", nil)
+func parseRepoURL(repoURL string) (registry, repoPath string, err error) {
+	u, err := url.Parse(repoURL)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid URL %q: %w", repoURL, err)
+	}
+
+	registry = u.Host
+	repoPath = strings.TrimPrefix(u.Path, "/")
+	return registry, repoPath, nil
+}
+
+func (a *HTTPTemplateAuthenticator) getHTTPClient(insecure bool) *http.Client {
 	if a.HTTPClient != nil {
 		return a.HTTPClient
 	}
@@ -183,56 +301,13 @@ func (a *HTTPAuthenticator) getHTTPClient(insecure bool) *http.Client {
 	return client
 }
 
-// buildRegistryScope builds a Docker v2 scope string from a repository URL.
-// Example: oci://registry.example.com/namespace/repo → repository:namespace/repo:pull
-func buildRegistryScope(repoURL string) string {
-	u := strings.TrimPrefix(repoURL, "oci://")
-	parts := strings.SplitN(u, "/", 2)
-	if len(parts) < 2 {
-		return ""
+// truncateString truncates a string to maxLen, adding "..." if truncated
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
 	}
-	return fmt.Sprintf("repository:%s:pull", parts[1])
+	return s[:maxLen] + "..."
 }
 
-// discoverAuthURL discovers the auth endpoint from the registry's 401 WWW-Authenticate header.
-func discoverAuthURL(ctx context.Context, repoURL string, client *http.Client, insecure bool) (string, error) {
-	host := extractRegistryHost(repoURL)
-	if host == "" {
-		return "", fmt.Errorf("could not extract registry host from URL")
-	}
-
-	scheme := "https"
-	if insecure {
-		scheme = "http"
-	}
-	pingURL := fmt.Sprintf("%s://%s/v2/", scheme, host)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pingURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create ping request: %w", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("ping request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		return "", fmt.Errorf("expected 401 from %s, got %d", pingURL, resp.StatusCode)
-	}
-
-	wwwAuth := resp.Header.Get("WWW-Authenticate")
-	if wwwAuth == "" {
-		return "", fmt.Errorf("no WWW-Authenticate header in 401 response")
-	}
-
-	realm := parseWWWAuthenticateRealm(wwwAuth)
-	if realm == "" {
-		return "", fmt.Errorf("could not parse realm from WWW-Authenticate: %s", wwwAuth)
-	}
-
-	return realm, nil
-}
-
-var _ Authenticator = (*HTTPAuthenticator)(nil)
+// Ensure HTTPTemplateAuthenticator implements Authenticator
+var _ Authenticator = (*HTTPTemplateAuthenticator)(nil)

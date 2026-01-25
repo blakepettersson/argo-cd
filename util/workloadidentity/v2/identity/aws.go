@@ -125,6 +125,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -142,34 +144,45 @@ const (
 
 // AWSProvider exchanges K8s JWTs for AWS credentials via STS
 type AWSProvider struct {
-	repoURL string
+	repo *v1alpha1.Repository
 }
 
-func (p *AWSProvider) GetAudience(*corev1.ServiceAccount) string {
-	return DefaultAWSAudience
-}
-
-func (p *AWSProvider) NeedsK8sToken() bool {
-	return true
+func (p *AWSProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
+	if p.repo.Type == "git" {
+		return repository.NewCodeCommitAuthenticator()
+	}
+	return repository.NewECRAuthenticator()
 }
 
 // NewAWSProvider creates a new AWS identity provider
-func NewAWSProvider(repoURL string) *AWSProvider {
+func NewAWSProvider(repo *v1alpha1.Repository) *AWSProvider {
 	return &AWSProvider{
-		repoURL: repoURL,
+		repo: repo,
 	}
 }
 
 // GetToken exchanges a K8s JWT for AWS credentials
-func (p *AWSProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, k8sToken string, cfg *Config) (*Token, error) {
+func (p *AWSProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, requestToken TokenRequester, cfg *Config) (*repository.Token, error) {
 	// Get role ARN from standard EKS annotation on service account
 	roleARN := sa.Annotations[AnnotationAWSRoleARN]
 	if roleARN == "" {
 		return nil, fmt.Errorf("service account %s missing %s annotation", sa.Name, AnnotationAWSRoleARN)
 	}
 
+	// Use configured audience or default to STS
+	audience := cfg.Audience
+	if audience == "" {
+		audience = DefaultAWSAudience
+	}
+
+	// Request K8s token with STS audience
+	k8sToken, err := requestToken(ctx, audience)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request K8s token: %w", err)
+	}
+
 	// Extract AWS region from ECR repository URL
-	region := extractAWSRegion(p.repoURL)
+	region := extractAWSRegion(p.repo.Repo)
 
 	log.WithFields(log.Fields{
 		"serviceAccount": sa.Name,
@@ -224,9 +237,9 @@ func (p *AWSProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, k
 		"expiration": assumeResult.Credentials.Expiration,
 	}).Info("AWS IRSA: successfully assumed IAM role")
 
-	return &Token{
-		Type: TokenTypeAWS,
-		AWSCredentials: &AWSCredentials{
+	return &repository.Token{
+		Type: repository.TokenTypeAWS,
+		AWSCredentials: &repository.AWSCredentials{
 			AccessKeyID:     *assumeResult.Credentials.AccessKeyId,
 			SecretAccessKey: *assumeResult.Credentials.SecretAccessKey,
 			SessionToken:    *assumeResult.Credentials.SessionToken,
