@@ -1,57 +1,25 @@
-# OIDC Exchange Workload Identity for ArgoCD
+# OIDC/HTTP Template Workload Identity for ArgoCD
 
-This guide explains how to configure ArgoCD to use OIDC token exchange for workload identity authentication with custom OIDC providers and registries.
+This guide explains how to configure ArgoCD to use OIDC token exchange and HTTP template-based authentication for workload identity with custom registries.
 
 ## Overview
 
-The OIDC provider (`workloadIdentityProvider: "oidc"`) enables ArgoCD to authenticate to container registries using:
+The `k8s` identity provider combined with the `http` repository authenticator enables ArgoCD to authenticate to container registries using:
 
-- **RFC 8693 OAuth 2.0 Token Exchange**: Exchange K8s JWT for an identity token
 - **Direct K8s OIDC**: Use K8s service account tokens directly with OIDC-enabled registries
-- **Registry Token Authentication**: Docker Registry v2 token-based authentication
+- **RFC 8693 Token Exchange**: Exchange K8s JWT for identity tokens
+- **Custom HTTP Endpoints**: Template-based HTTP requests for any token exchange API
 
 This provides flexibility to integrate with:
 
-- Custom OIDC identity providers
-- Self-hosted registries (Harbor, GitLab Registry, etc.)
-- Registries with OIDC federation (Quay, etc.)
-- Any system supporting RFC 8693 token exchange
+- Self-hosted registries (Harbor, Quay, GitLab Registry, etc.)
+- Registries with OIDC federation (Quay robot federation, etc.)
+- Custom identity providers
+- Any system with HTTP-based token exchange
 
 ## Architecture
 
-The OIDC exchange provider supports three authentication modes:
-
-### Mode 1: Two-Step Token Exchange
-
-```
-┌─────────────────┐     ┌────────────────────┐     ┌─────────────┐
-│ ArgoCD (K8s SA) │────▶│ Identity Provider  │────▶│  Registry   │
-│    Token        │     │  (Token Exchange)  │     │   (Auth)    │
-└─────────────────┘     └────────────────────┘     └─────────────┘
-         │                       │                        │
-         │ 1. K8s JWT            │ 2. Identity Token      │ 3. Registry Token
-         ▼                       ▼                        ▼
-    TokenRequest API      RFC 8693 Exchange       Docker Registry Auth
-```
-
-**Use when:** You have an intermediate identity provider (SPIFFE proxy, custom OAuth server).
-
-### Mode 2: Single-Step Token Exchange
-
-```
-┌─────────────────┐     ┌────────────────────┐
-│ ArgoCD (K8s SA) │────▶│  Token Exchange    │
-│    Token        │     │     Service        │
-└─────────────────┘     └────────────────────┘
-         │                       │
-         │ 1. K8s JWT            │ 2. Bearer Token
-         ▼                       ▼
-    TokenRequest API      RFC 8693 Exchange
-```
-
-**Use when:** Token exchange returns credentials that work directly with the registry.
-
-### Mode 3: Direct K8s OIDC
+### K8s OIDC to Registry
 
 ```
 ┌─────────────────┐     ┌─────────────────┐
@@ -61,10 +29,10 @@ The OIDC exchange provider supports three authentication modes:
          │                      │
          │ 1. K8s JWT           │ 2. Registry Token
          ▼                      ▼
-    TokenRequest API     Direct OIDC Validation
+    TokenRequest API     HTTP Template Request
 ```
 
-**Use when:** Registry directly trusts K8s OIDC (simplest setup, no intermediate IdP).
+**Use when:** Registry directly trusts K8s OIDC tokens (simplest setup).
 
 ## Configuration Reference
 
@@ -72,36 +40,37 @@ The OIDC exchange provider supports three authentication modes:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `useWorkloadIdentity` | Yes | Set to `"true"` to enable |
-| `workloadIdentityProvider` | Yes | Set to `"oidc"` |
-| `workloadIdentityTokenURL` | Mode 1,2 | RFC 8693 token exchange endpoint |
-| `workloadIdentityAudience` | Mode 1,2 | Audience for token exchange |
-| `workloadIdentityRegistryAuthURL` | Mode 1,3 | Docker Registry v2 auth endpoint |
-| `workloadIdentityRegistryService` | Optional | Registry service name (auto-detected from URL) |
-| `workloadIdentityRegistryUsername` | Optional | Username for Basic Auth (e.g., robot accounts) |
+| `workloadIdentityProvider` | Yes | Identity provider: `k8s`, `aws`, `gcp`, `azure`, `spiffe` |
+| `workloadIdentityAudience` | Optional | Audience for the K8s JWT token |
+| `workloadIdentityTokenURL` | Optional | Token URL for identity provider |
+| `workloadIdentityUsername` | Optional | Username for Basic Auth (e.g., robot accounts) |
+| `workloadIdentityAuthHost` | Optional | Override auth endpoint host (if different from registry) |
+| `workloadIdentityPathTemplate` | Yes* | URL path template for auth request |
+| `workloadIdentityBodyTemplate` | Optional | Request body template (for POST requests) |
+| `workloadIdentityMethod` | Optional | HTTP method: `GET` (default) or `POST` |
+| `workloadIdentityAuthType` | Optional | Auth type: `bearer` (default), `basic`, or `none` |
+| `workloadIdentityParams` | Optional | Custom parameters for templates |
+| `workloadIdentityResponseTokenField` | Optional | JSON field to extract from response (default: tries `access_token`, `token`, `refresh_token`) |
 | `insecure` | Optional | Skip TLS verification |
 
-### Mode Selection Logic
+*Required when using the HTTP template authenticator
 
-```
-if tokenURL is set:
-    → Mode 1 or 2 (token exchange)
-    if registryAuthURL is set:
-        → Mode 1 (two-step)
-    else:
-        → Mode 2 (single-step, token is password)
-else:
-    if registryAuthURL is set:
-        → Mode 3 (direct K8s OIDC)
-    else:
-        → Error (must specify tokenURL or registryAuthURL)
-```
+### Template Variables
+
+Templates use Go template syntax with [Sprig functions](http://masterminds.github.io/sprig/). Built-in variables:
+
+| Variable | Description |
+|----------|-------------|
+| `{{ .token }}` | The identity token (K8s JWT or exchanged token) |
+| `{{ .registry }}` | Registry host from repo URL |
+| `{{ .repo }}` | Repository path from repo URL |
+| `{{ .<param> }}` | Any custom param from `workloadIdentityParams` |
 
 ## Setup Examples
 
-### Harbor with K8s OIDC (Mode 3)
+### Quay Robot Federation
 
-Configure Harbor to trust your Kubernetes cluster's OIDC issuer directly.
+Configure Quay to use robot account federation with K8s OIDC.
 
 #### Step 1: Get K8s OIDC Issuer
 
@@ -114,68 +83,16 @@ aws eks describe-cluster --name $CLUSTER_NAME \
     --query "cluster.identity.oidc.issuer" --output text
 
 # For GKE
-# https://container.googleapis.com/v1/projects/$PROJECT/locations/$LOCATION/clusters/$CLUSTER
+gcloud container clusters describe $CLUSTER_NAME \
+    --format="value(selfLink)"
 ```
 
-#### Step 2: Configure Harbor OIDC
-
-In Harbor Administration > Configuration > Authentication:
-
-| Setting | Value |
-|---------|-------|
-| Auth Mode | OIDC |
-| OIDC Provider Name | Kubernetes |
-| OIDC Endpoint | `<k8s-oidc-issuer-url>` |
-| OIDC Client ID | `harbor` (or your chosen audience) |
-| OIDC Scope | `openid` |
-| Verify Certificate | `true` |
-| Automatic Onboarding | `true` |
-| Username Claim | `sub` |
-
-#### Step 3: Create Service Account
-
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: argocd-project-default
-  namespace: argocd
-```
-
-#### Step 4: Create Repository Secret
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: harbor-repo
-  namespace: argocd
-  labels:
-    argocd.argoproj.io/secret-type: repository
-stringData:
-  type: helm
-  url: oci://harbor.example.com/library/charts
-  project: default
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "oidc"
-  workloadIdentityAudience: "harbor"
-  workloadIdentityRegistryAuthURL: "https://harbor.example.com/service/token"
-  workloadIdentityRegistryService: "harbor-registry"
-```
-
-### Quay with Robot Federation (Mode 1)
-
-Configure Quay to use robot account federation with K8s OIDC.
-
-#### Step 1: Create Quay Robot Account
+#### Step 2: Create Quay Robot Account with Federation
 
 1. In Quay, navigate to your organization
 2. Create a robot account (e.g., `myorg+argocd`)
 3. Grant the robot read access to your repositories
-
-#### Step 2: Configure Robot Federation
-
-In the robot account settings, add OIDC federation:
+4. In robot account settings, add OIDC federation:
 
 | Setting | Value |
 |---------|-------|
@@ -203,24 +120,43 @@ metadata:
   labels:
     argocd.argoproj.io/secret-type: repository
 stringData:
-  type: helm
+  type: oci
   url: oci://quay.example.com/myorg/charts
   project: default
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "oidc"
-  workloadIdentityAudience: "quay.example.com"
-  workloadIdentityRegistryAuthURL: "https://quay.example.com/oauth2/federation/robot/token"
-  workloadIdentityRegistryService: "quay.example.com"
-  workloadIdentityRegistryUsername: "myorg+argocd"
+
+  # Enable workload identity with K8s provider
+  workloadIdentityProvider: k8s
+
+  # HTTP template authenticator configuration
+  workloadIdentityPathTemplate: "/oauth2/federation/robot/token"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: basic
+  workloadIdentityUsername: "myorg+argocd"
+  workloadIdentityResponseTokenField: token
 ```
 
-Note: When `workloadIdentityRegistryUsername` is set, the provider uses Basic Auth with the K8s JWT as the password. This is required for Quay robot federation.
+Note: When `workloadIdentityAuthType: basic` is set, the authenticator uses Basic Auth with `workloadIdentityUsername` and the K8s JWT as the password.
 
-### Custom Token Exchange Service (Mode 2)
+### Harbor with K8s OIDC
 
-For custom identity providers that implement RFC 8693.
+Configure Harbor to trust your Kubernetes cluster's OIDC issuer directly.
 
-#### Step 1: Create Service Account
+#### Step 1: Configure Harbor OIDC
+
+In Harbor Administration > Configuration > Authentication:
+
+| Setting | Value |
+|---------|-------|
+| Auth Mode | OIDC |
+| OIDC Provider Name | Kubernetes |
+| OIDC Endpoint | `<k8s-oidc-issuer-url>` |
+| OIDC Client ID | `harbor` (or your chosen audience) |
+| OIDC Scope | `openid` |
+| Verify Certificate | `true` |
+| Automatic Onboarding | `true` |
+| Username Claim | `sub` |
+
+#### Step 2: Create Service Account
 
 ```yaml
 apiVersion: v1
@@ -230,28 +166,30 @@ metadata:
   namespace: argocd
 ```
 
-#### Step 2: Create Repository Secret
+#### Step 3: Create Repository Secret
 
 ```yaml
 apiVersion: v1
 kind: Secret
 metadata:
-  name: custom-repo
+  name: harbor-repo
   namespace: argocd
   labels:
     argocd.argoproj.io/secret-type: repository
 stringData:
-  type: helm
-  url: oci://registry.example.com/charts
+  type: oci
+  url: oci://harbor.example.com/library/charts
   project: default
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "oidc"
-  # RFC 8693 token exchange endpoint
-  workloadIdentityTokenURL: "https://idp.example.com/oauth2/token"
-  workloadIdentityAudience: "registry.example.com"
-  # If registry also needs token exchange
-  workloadIdentityRegistryAuthURL: "https://registry.example.com/v2/auth"
-  workloadIdentityRegistryService: "registry.example.com"
+
+  # Enable workload identity with K8s provider
+  workloadIdentityProvider: k8s
+  workloadIdentityAudience: harbor
+
+  # HTTP template authenticator configuration
+  workloadIdentityPathTemplate: "/service/token?service=harbor-registry&scope=repository:{{ .repo }}:pull"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: bearer
+  workloadIdentityResponseTokenField: token
 ```
 
 ### GitLab Container Registry
@@ -260,7 +198,7 @@ GitLab supports OIDC for container registry authentication.
 
 #### Step 1: Configure GitLab OIDC
 
-In GitLab Admin > Settings > General > Sign-in restrictions, enable OIDC authentication and configure to trust your K8s cluster.
+In GitLab Admin > Settings > General > Sign-in restrictions, configure OIDC to trust your K8s cluster.
 
 #### Step 2: Create Repository Secret
 
@@ -273,14 +211,92 @@ metadata:
   labels:
     argocd.argoproj.io/secret-type: repository
 stringData:
-  type: helm
+  type: oci
   url: oci://registry.gitlab.example.com/group/project
   project: default
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "oidc"
-  workloadIdentityAudience: "gitlab"
-  workloadIdentityRegistryAuthURL: "https://registry.gitlab.example.com/jwt/auth"
-  workloadIdentityRegistryService: "container_registry"
+
+  # Enable workload identity with K8s provider
+  workloadIdentityProvider: k8s
+  workloadIdentityAudience: gitlab
+
+  # HTTP template authenticator configuration
+  workloadIdentityPathTemplate: "/jwt/auth?service=container_registry&scope=repository:{{ .repo }}:pull"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: bearer
+  workloadIdentityResponseTokenField: token
+```
+
+### JFrog Artifactory OIDC
+
+JFrog Artifactory supports OIDC token exchange.
+
+#### Step 1: Configure JFrog OIDC Provider
+
+In Artifactory Administration > Security > Settings > OIDC, add your K8s OIDC provider.
+
+#### Step 2: Create Repository Secret
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jfrog-repo
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: oci
+  url: oci://artifactory.example.com/docker-local/charts
+  project: default
+
+  # Enable workload identity with K8s provider
+  workloadIdentityProvider: k8s
+
+  # HTTP template authenticator configuration (POST with JSON body)
+  workloadIdentityAuthHost: artifactory.example.com
+  workloadIdentityPathTemplate: "/access/api/v1/oidc/token"
+  workloadIdentityMethod: POST
+  workloadIdentityBodyTemplate: '{"grant_type":"urn:ietf:params:oauth:grant-type:token-exchange","subject_token":"{{ .token }}","provider_name":"{{ .provider }}"}'
+  workloadIdentityAuthType: none
+  workloadIdentityResponseTokenField: access_token
+  workloadIdentityParams: |
+    provider: my-k8s-oidc-provider
+```
+
+### Octo-STS (GitHub Container Registry via OIDC)
+
+Use [Octo-STS](https://github.com/octo-sts/app) to exchange K8s tokens for GitHub tokens.
+
+#### Step 1: Deploy Octo-STS
+
+Follow the Octo-STS documentation to deploy it and configure the trust policy for your K8s OIDC issuer.
+
+#### Step 2: Create Repository Secret
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ghcr-repo
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: oci
+  url: oci://ghcr.io/myorg/charts
+  project: default
+
+  # Enable workload identity with K8s provider
+  workloadIdentityProvider: k8s
+
+  # HTTP template authenticator configuration
+  workloadIdentityAuthHost: octo-sts.example.com
+  workloadIdentityPathTemplate: "/sts/exchange?scope={{ .repo }}&identity={{ .policy }}"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: bearer
+  workloadIdentityResponseTokenField: token
+  workloadIdentityParams: |
+    policy: argocd
 ```
 
 ## Multi-Project Setup
@@ -303,13 +319,15 @@ metadata:
   labels:
     argocd.argoproj.io/secret-type: repository
 stringData:
-  type: helm
+  type: oci
   url: oci://harbor.example.com/production/charts
   project: production
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "oidc"
-  workloadIdentityAudience: "harbor"
-  workloadIdentityRegistryAuthURL: "https://harbor.example.com/service/token"
+  workloadIdentityProvider: k8s
+  workloadIdentityAudience: harbor
+  workloadIdentityPathTemplate: "/service/token?service=harbor-registry&scope=repository:{{ .repo }}:pull"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: bearer
+  workloadIdentityResponseTokenField: token
 ---
 # Staging - Quay
 apiVersion: v1
@@ -326,142 +344,80 @@ metadata:
   labels:
     argocd.argoproj.io/secret-type: repository
 stringData:
-  type: helm
+  type: oci
   url: oci://quay.example.com/staging/charts
   project: staging
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "oidc"
-  workloadIdentityAudience: "quay.example.com"
-  workloadIdentityRegistryAuthURL: "https://quay.example.com/oauth2/federation/robot/token"
-  workloadIdentityRegistryUsername: "staging+argocd"
-```
-
-## RFC 8693 Token Exchange Details
-
-The OIDC exchange provider implements RFC 8693 OAuth 2.0 Token Exchange:
-
-**Request:**
-```http
-POST /oauth2/token HTTP/1.1
-Content-Type: application/x-www-form-urlencoded
-
-grant_type=urn:ietf:params:oauth:grant-type:token-exchange
-&subject_token=<k8s-jwt>
-&subject_token_type=urn:ietf:params:oauth:token-type:jwt
-&requested_token_type=urn:ietf:params:oauth:token-type:access_token
-&audience=<registry-audience>
-```
-
-**Response:**
-```json
-{
-    "access_token": "<exchanged-token>",
-    "token_type": "Bearer",
-    "expires_in": 3600
-}
-```
-
-## Docker Registry v2 Token Auth
-
-For registry authentication, the provider implements Docker Registry v2 token authentication:
-
-**Request (Bearer mode):**
-```http
-GET /service/token?service=registry&scope=repository:charts/mychart:pull HTTP/1.1
-Authorization: Bearer <identity-token>
-```
-
-**Request (Basic mode, when username is set):**
-```http
-GET /service/token?service=registry&scope=repository:charts/mychart:pull HTTP/1.1
-Authorization: Basic <base64(username:identity-token)>
-```
-
-**Response:**
-```json
-{
-    "token": "<registry-token>",
-    "expires_in": 3600
-}
+  workloadIdentityProvider: k8s
+  workloadIdentityPathTemplate: "/oauth2/federation/robot/token"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: basic
+  workloadIdentityUsername: "staging+argocd"
+  workloadIdentityResponseTokenField: token
 ```
 
 ## Troubleshooting
 
-### Error: "either workloadIdentityTokenURL or workloadIdentityRegistryAuthURL must be specified"
+### Error: "pathTemplate is required for HTTP template authenticator"
 
-The repository secret doesn't have the required configuration.
+The repository secret is missing the required `workloadIdentityPathTemplate` field.
 
-**Solution:** Specify at least one of:
-- `workloadIdentityTokenURL` for token exchange
-- `workloadIdentityRegistryAuthURL` for direct registry auth
+**Solution:** Add `workloadIdentityPathTemplate` with the URL path for the auth endpoint.
 
-### Error: "workloadIdentityAudience not specified for oidc provider with tokenURL"
+### Error: "username is required for basic auth"
 
-Token exchange requires an audience.
+The `workloadIdentityAuthType` is set to `basic` but `workloadIdentityUsername` is missing.
 
-**Solution:** Add `workloadIdentityAudience` to the repository secret.
+**Solution:** Add `workloadIdentityUsername` to the repository secret.
 
-### Error: "token exchange failed with status 400"
+### Error: "request failed with status 401"
 
-The token exchange endpoint rejected the request.
+The registry rejected the authentication request.
 
 **Solution:**
-1. Verify the K8s JWT audience matches what the token exchange service expects
-2. Check if the token exchange service trusts your K8s OIDC issuer
-3. Verify the `subject` claim format is correct
+1. Verify the registry trusts your K8s OIDC issuer
+2. Check the K8s service account subject matches the registry's expected format
+3. For Basic Auth mode, verify `workloadIdentityUsername` is correct
+4. Test the endpoint manually with curl (see below)
 
-### Error: "registry token request failed with status 401"
+### Error: "field 'token' not found or empty in response"
 
-The registry rejected the identity token.
-
-**Solution:**
-1. Verify the registry trusts the identity token's issuer
-2. For Basic Auth mode, check `workloadIdentityRegistryUsername` is correct
-3. Verify the K8s service account subject matches the registry's OIDC config
-
-### Error: "registry token response missing token field"
-
-The registry returned an unexpected response format.
+The auth endpoint returned a response that doesn't contain the expected token field.
 
 **Solution:**
-1. Verify `workloadIdentityRegistryAuthURL` points to the correct endpoint
-2. Check if the registry uses `token` or `access_token` field (both are supported)
-3. Test the endpoint manually with curl
+1. Set `workloadIdentityResponseTokenField` to the correct field name
+2. Test the endpoint manually to see the actual response format
 
-### Testing Token Exchange Manually
+### Testing Authentication Manually
 
 ```bash
 # Get a K8s token
 TOKEN=$(kubectl create token argocd-project-default -n argocd --audience=my-audience)
 
-# Test RFC 8693 exchange
-curl -X POST https://idp.example.com/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
-  -d "subject_token=$TOKEN" \
-  -d "subject_token_type=urn:ietf:params:oauth:token-type:jwt" \
-  -d "audience=registry.example.com"
-
-# Test registry auth (Bearer)
-curl "https://registry.example.com/service/token?service=registry&scope=repository:charts/mychart:pull" \
+# Test Bearer auth
+curl "https://registry.example.com/service/token?service=registry&scope=repository:myrepo:pull" \
   -H "Authorization: Bearer $TOKEN"
 
-# Test registry auth (Basic)
-curl "https://registry.example.com/service/token?service=registry&scope=repository:charts/mychart:pull" \
-  -u "myrobot:$TOKEN"
+# Test Basic auth (for Quay robot federation)
+curl "https://quay.example.com/oauth2/federation/robot/token" \
+  -u "myorg+robot:$TOKEN"
+
+# Test POST with JSON body
+curl -X POST "https://idp.example.com/oauth2/token" \
+  -H "Content-Type: application/json" \
+  -d "{\"grant_type\":\"urn:ietf:params:oauth:grant-type:token-exchange\",\"subject_token\":\"$TOKEN\"}"
 ```
 
 ## Security Considerations
 
-1. **Trust chain**: Ensure each component in the chain (K8s OIDC → IdP → Registry) properly validates tokens.
+1. **Trust chain**: Ensure each component (K8s OIDC -> Registry) properly validates tokens.
 
-2. **Audience validation**: Always set explicit audiences to prevent token reuse attacks.
+2. **Audience validation**: Set explicit `workloadIdentityAudience` to prevent token reuse attacks.
 
 3. **TLS verification**: Only set `insecure: "true"` for development environments.
 
 4. **Subject binding**: Configure registries to validate the `sub` claim matches expected service accounts.
 
-5. **Token lifetime**: K8s tokens requested via TokenRequest API have configurable expiration (default varies by cluster).
+5. **Token lifetime**: K8s tokens requested via TokenRequest API expire in 1 hour by default.
 
 ## References
 

@@ -187,9 +187,8 @@ stringData:
   url: oci://myregistry.azurecr.io/charts
   project: production  # Links to argocd-project-production service account
 
-  # Enable workload identity
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "azure"
+  # Enable Azure workload identity
+  workloadIdentityProvider: azure
 
   # Optional: Override token endpoint (for sovereign clouds)
   # workloadIdentityTokenURL: "https://login.microsoftonline.us/{tenantID}/oauth2/v2.0/token"
@@ -243,8 +242,7 @@ stringData:
   type: helm
   url: oci://prodregistry.azurecr.io/charts
   project: production
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "azure"
+  workloadIdentityProvider: azure
 ```
 
 **Azure AD federated credential:**
@@ -284,8 +282,7 @@ stringData:
   type: helm
   url: oci://stagingregistry.azurecr.io/charts
   project: staging
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "azure"
+  workloadIdentityProvider: azure
 ```
 
 ## Azure Sovereign Clouds

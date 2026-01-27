@@ -219,17 +219,18 @@ stringData:
   url: oci://quay.example.org/myorg/charts
   project: default  # Links to argocd-project-default service account
 
-  # Enable workload identity
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "spiffe"
+  # Enable SPIFFE workload identity
+  workloadIdentityProvider: spiffe
 
   # SPIFFE JWT audience (registry validates this)
   workloadIdentityAudience: "quay.example.org"
 
-  # Registry auth endpoint for robot federation
-  workloadIdentityRegistryAuthURL: "https://quay.example.org/oauth2/federation/robot/token"
-  workloadIdentityRegistryService: "quay.example.org"
-  workloadIdentityRegistryUsername: "myorg+argocd"  # Robot account name
+  # HTTP template authenticator for robot federation
+  workloadIdentityPathTemplate: "/oauth2/federation/robot/token"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: basic
+  workloadIdentityUsername: "myorg+argocd"  # Robot account name
+  workloadIdentityResponseTokenField: token
 
   # Optional: skip TLS verification (not recommended for production)
   # insecure: "true"
@@ -280,12 +281,13 @@ stringData:
   type: helm
   url: oci://quay.example.org/prod/charts
   project: production
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "spiffe"
+  workloadIdentityProvider: spiffe
   workloadIdentityAudience: "quay.example.org"
-  workloadIdentityRegistryAuthURL: "https://quay.example.org/oauth2/federation/robot/token"
-  workloadIdentityRegistryService: "quay.example.org"
-  workloadIdentityRegistryUsername: "prod+argocd"
+  workloadIdentityPathTemplate: "/oauth2/federation/robot/token"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: basic
+  workloadIdentityUsername: "prod+argocd"
+  workloadIdentityResponseTokenField: token
 ```
 
 **SPIRE entry:**
@@ -324,12 +326,13 @@ stringData:
   type: helm
   url: oci://quay.example.org/staging/charts
   project: staging
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "spiffe"
+  workloadIdentityProvider: spiffe
   workloadIdentityAudience: "quay.example.org"
-  workloadIdentityRegistryAuthURL: "https://quay.example.org/oauth2/federation/robot/token"
-  workloadIdentityRegistryService: "quay.example.org"
-  workloadIdentityRegistryUsername: "staging+argocd"
+  workloadIdentityPathTemplate: "/oauth2/federation/robot/token"
+  workloadIdentityMethod: GET
+  workloadIdentityAuthType: basic
+  workloadIdentityUsername: "staging+argocd"
+  workloadIdentityResponseTokenField: token
 ```
 
 ## Troubleshooting
@@ -384,6 +387,12 @@ Authentication succeeded but the robot account doesn't have access.
 **Solution:**
 1. Verify the robot account has read access to the repository
 2. Check the scope in the token request matches the repository path
+
+### Error: "username is required for basic auth"
+
+The `workloadIdentityAuthType` is set to `basic` but `workloadIdentityUsername` is missing.
+
+**Solution:** Add `workloadIdentityUsername` with the robot account name to the repository secret.
 
 ## SPIRE Entry Management
 

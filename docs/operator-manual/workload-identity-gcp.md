@@ -216,9 +216,8 @@ stringData:
   url: oci://us-central1-docker.pkg.dev/my-gcp-project/my-charts
   project: production  # Links to argocd-project-production service account
 
-  # Enable workload identity
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "gcp"
+  # Enable GCP workload identity
+  workloadIdentityProvider: gcp
 
   # Optional: Override WIF audience (defaults to annotation on SA)
   # workloadIdentityAudience: //iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/argocd-pool/providers/argocd-k8s
@@ -275,8 +274,7 @@ stringData:
   type: helm
   url: oci://us-central1-docker.pkg.dev/my-gcp-project/prod-charts
   project: production
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "gcp"
+  workloadIdentityProvider: gcp
 ```
 
 **GCP permissions:**
@@ -311,8 +309,7 @@ stringData:
   type: helm
   url: oci://us-central1-docker.pkg.dev/my-gcp-project/staging-charts
   project: staging
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "gcp"
+  workloadIdentityProvider: gcp
 ```
 
 ## GKE Workload Identity (Simplified)

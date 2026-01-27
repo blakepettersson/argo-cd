@@ -1,17 +1,26 @@
 # AWS IRSA Workload Identity for ArgoCD
 
-This guide explains how to configure ArgoCD to use AWS IAM Roles for Service Accounts (IRSA) for workload identity authentication with Amazon Elastic Container Registry (ECR).
+This guide explains how to configure ArgoCD to use AWS IAM Roles for Service Accounts (IRSA) for workload identity authentication with Amazon ECR and AWS CodeCommit.
 
 ## Overview
 
-The AWS provider enables ArgoCD to authenticate to ECR using IRSA. This provides:
+The AWS provider enables ArgoCD to authenticate to AWS services using IRSA. This provides:
 
 - **Zero static credentials**: No long-lived AWS access keys stored in secrets
 - **Per-project isolation**: Each ArgoCD project can assume a different IAM role
-- **Fine-grained access control**: IAM policies control which ECR repositories each project can access
+- **Fine-grained access control**: IAM policies control which repositories each project can access
 - **Automatic credential rotation**: Temporary credentials are refreshed automatically
 
+## Supported AWS Services
+
+| Service | Repository Type | Use Case |
+|---------|-----------------|----------|
+| **Amazon ECR** | OCI/Helm | Container images, Helm charts stored in ECR |
+| **AWS CodeCommit** | Git | Git repositories hosted in CodeCommit |
+
 ## Architecture
+
+### ECR Authentication Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -42,30 +51,22 @@ The AWS provider enables ArgoCD to authenticate to ECR using IRSA. This provides
 │  └─────────────────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              AWS ECR                                         │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ 4. GetAuthorizationToken                                                ││
-│  │    - Uses temporary credentials from STS                                ││
-│  │    - Returns base64-encoded username:password for registry              ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           ECR Registry Access                                │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ 5. ArgoCD uses ECR credentials to pull manifests/charts                 ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────────────────┘
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+┌───────────────────────────────────┐ ┌───────────────────────────────────────┐
+│           AWS ECR                 │ │         AWS CodeCommit                │
+│  ┌─────────────────────────────┐  │ │  ┌─────────────────────────────────┐  │
+│  │ 4a. GetAuthorizationToken   │  │ │  │ 4b. Generate SigV4 signed       │  │
+│  │   - Returns Docker creds    │  │ │  │     Git credentials             │  │
+│  └─────────────────────────────┘  │ │  └─────────────────────────────────┘  │
+└───────────────────────────────────┘ └───────────────────────────────────────┘
 ```
 
 ## Prerequisites
 
 1. **EKS cluster** with OIDC provider configured
 2. **IAM permissions** to create roles and policies
-3. **ECR repositories** accessible from your cluster
+3. **ECR repositories** or **CodeCommit repositories** accessible from your cluster
 
 ## Configuration Steps
 
@@ -93,9 +94,9 @@ export OIDC_PROVIDER=$(aws eks describe-cluster --name $CLUSTER_NAME \
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ```
 
-### Step 2: Create IAM Policy for ECR Access
+### Step 2: Create IAM Policy
 
-Create an IAM policy that grants read access to ECR:
+#### For ECR Access
 
 ```bash
 cat <<EOF > ecr-policy.json
@@ -127,18 +128,43 @@ aws iam create-policy \
     --policy-document file://ecr-policy.json
 ```
 
+#### For CodeCommit Access
+
+```bash
+cat <<EOF > codecommit-policy.json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "codecommit:GitPull",
+                "codecommit:GetBranch",
+                "codecommit:GetCommit",
+                "codecommit:GetRepository",
+                "codecommit:ListBranches"
+            ],
+            "Resource": "arn:aws:codecommit:${AWS_REGION}:${AWS_ACCOUNT_ID}:*"
+        }
+    ]
+}
+EOF
+
+aws iam create-policy \
+    --policy-name ArgoCD-CodeCommit-ReadOnly \
+    --policy-document file://codecommit-policy.json
+```
+
 For more restrictive access, limit the `Resource` to specific repositories:
 
 ```json
 "Resource": [
     "arn:aws:ecr:us-west-2:123456789012:repository/production/*",
-    "arn:aws:ecr:us-west-2:123456789012:repository/charts/*"
+    "arn:aws:codecommit:us-west-2:123456789012:my-app-repo"
 ]
 ```
 
 ### Step 3: Create IAM Role with Trust Policy
-
-Create an IAM role that trusts the ArgoCD service account:
 
 ```bash
 export ARGOCD_NAMESPACE="argocd"
@@ -170,9 +196,14 @@ aws iam create-role \
     --role-name $ROLE_NAME \
     --assume-role-policy-document file://trust-policy.json
 
+# Attach policies based on what you need
 aws iam attach-role-policy \
     --role-name $ROLE_NAME \
     --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/ArgoCD-ECR-ReadOnly
+
+aws iam attach-role-policy \
+    --role-name $ROLE_NAME \
+    --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/ArgoCD-CodeCommit-ReadOnly
 ```
 
 ### Step 4: Create Project Service Account
@@ -190,9 +221,9 @@ metadata:
     eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/argocd-project-production
 ```
 
-### Step 5: Create Repository Secret
+## ECR Repository Configuration
 
-Create the ArgoCD repository secret with AWS workload identity:
+### Repository Secret
 
 ```yaml
 apiVersion: v1
@@ -207,15 +238,14 @@ stringData:
   url: oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/charts
   project: production  # Links to argocd-project-production service account
 
-  # Enable workload identity
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "aws"
+  # Enable AWS workload identity
+  workloadIdentityProvider: aws
 
   # Optional: Override STS endpoint (for GovCloud, China regions)
   # workloadIdentityTokenURL: "https://sts.us-gov-west-1.amazonaws.com"
 ```
 
-### Step 6: Create Application
+### Application Example
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -234,11 +264,52 @@ spec:
     namespace: my-app
 ```
 
+## CodeCommit Repository Configuration
+
+### Repository Secret
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-codecommit-repo
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: https://git-codecommit.us-west-2.amazonaws.com/v1/repos/my-app-repo
+  project: production  # Links to argocd-project-production service account
+
+  # Enable AWS workload identity
+  workloadIdentityProvider: aws
+
+  # Optional: Override STS endpoint (for GovCloud, China regions)
+  # workloadIdentityTokenURL: "https://sts.us-gov-west-1.amazonaws.com"
+```
+
+### Application Example
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  project: production  # Must match the project in repository secret
+  source:
+    repoURL: https://git-codecommit.us-west-2.amazonaws.com/v1/repos/my-app-repo
+    path: manifests
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: my-app
+```
+
 ## Multi-Project Setup
 
-To support multiple projects with different ECR access:
-
-### Project A (production)
+### Project A (production) - ECR
 
 ```yaml
 # Service Account
@@ -262,8 +333,7 @@ stringData:
   type: helm
   url: oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/prod-charts
   project: production
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "aws"
+  workloadIdentityProvider: aws
 ```
 
 **IAM Trust Policy:**
@@ -288,7 +358,7 @@ stringData:
 }
 ```
 
-### Project B (staging)
+### Project B (staging) - CodeCommit
 
 ```yaml
 # Service Account
@@ -304,24 +374,75 @@ metadata:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: staging-ecr
+  name: staging-codecommit
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: https://git-codecommit.us-west-2.amazonaws.com/v1/repos/staging-manifests
+  project: staging
+  workloadIdentityProvider: aws
+```
+
+### Mixed ECR and CodeCommit Setup
+
+A single project can access both ECR and CodeCommit repositories if the IAM role has permissions for both:
+
+```yaml
+# Service Account with both ECR and CodeCommit access
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-project-platform
+  namespace: argocd
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/argocd-project-platform
+---
+# ECR Repository for Helm charts
+apiVersion: v1
+kind: Secret
+metadata:
+  name: platform-ecr
   namespace: argocd
   labels:
     argocd.argoproj.io/secret-type: repository
 stringData:
   type: helm
-  url: oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/staging-charts
-  project: staging
-  useWorkloadIdentity: "true"
-  workloadIdentityProvider: "aws"
+  url: oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/platform-charts
+  project: platform
+  workloadIdentityProvider: aws
+---
+# CodeCommit Repository for manifests
+apiVersion: v1
+kind: Secret
+metadata:
+  name: platform-codecommit
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: https://git-codecommit.us-west-2.amazonaws.com/v1/repos/platform-manifests
+  project: platform
+  workloadIdentityProvider: aws
 ```
 
 ## Region Detection
+
+### ECR
 
 The AWS region is automatically extracted from the ECR repository URL:
 
 - `123456789012.dkr.ecr.us-west-2.amazonaws.com` → `us-west-2`
 - `123456789012.dkr.ecr.eu-central-1.amazonaws.com` → `eu-central-1`
+
+### CodeCommit
+
+The AWS region is automatically extracted from the CodeCommit repository URL:
+
+- `git-codecommit.us-west-2.amazonaws.com` → `us-west-2`
+- `git-codecommit.eu-west-1.amazonaws.com` → `eu-west-1`
 
 If the region cannot be determined, it defaults to `us-east-1`.
 
@@ -375,6 +496,15 @@ The ECR GetAuthorizationToken call succeeded but returned empty data.
 1. Verify you're calling ECR in the correct region
 2. Check if the ECR service is available in your region
 
+### Error: "failed to generate CodeCommit credentials"
+
+The CodeCommit credential generation failed.
+
+**Solution:**
+1. Verify the IAM role has CodeCommit permissions
+2. Check the repository URL format is correct: `https://git-codecommit.<region>.amazonaws.com/v1/repos/<repo-name>`
+3. Ensure network connectivity to CodeCommit endpoints
+
 ### Error: "failed to create AWS session"
 
 Unable to create AWS SDK session.
@@ -388,7 +518,7 @@ Unable to create AWS SDK session.
 
 This implementation uses IRSA (IAM Roles for Service Accounts) rather than the newer EKS Pod Identity feature. While EKS Pod Identity is simpler to set up for single-identity workloads, IRSA is required for ArgoCD's multi-tenant workload identity model because:
 
-- ArgoCD needs to assume different IAM roles per project from a single repo-server pod
+- ArgoCD needs to assume different IAM roles per project from a single controller pod
 - IRSA allows exchanging any service account token via STS AssumeRoleWithWebIdentity
 - EKS Pod Identity injects credentials at pod startup for only the pod's own service account
 
@@ -396,9 +526,9 @@ IRSA and EKS Pod Identity coexist on the same cluster - you can use Pod Identity
 
 ## Security Considerations
 
-1. **Least privilege IAM policies**: Grant only the minimum ECR permissions needed for each project.
+1. **Least privilege IAM policies**: Grant only the minimum permissions needed for each project.
 
-2. **Repository-level restrictions**: Limit IAM policies to specific ECR repositories when possible.
+2. **Repository-level restrictions**: Limit IAM policies to specific ECR repositories or CodeCommit repos when possible.
 
 3. **Trust policy scope**: Each IAM role should only trust its specific service account.
 
@@ -411,4 +541,5 @@ IRSA and EKS Pod Identity coexist on the same cluster - you can use Pod Identity
 - [AWS IAM Roles for Service Accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html)
 - [EKS OIDC Provider](https://docs.aws.amazon.com/eks/latest/userguide/enable-iam-roles-for-service-accounts.html)
 - [ECR Authentication](https://docs.aws.amazon.com/AmazonECR/latest/userguide/registry_auth.html)
+- [CodeCommit Authentication](https://docs.aws.amazon.com/codecommit/latest/userguide/auth-and-access-control.html)
 - [AWS STS AssumeRoleWithWebIdentity](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html)
