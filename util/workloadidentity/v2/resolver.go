@@ -38,7 +38,7 @@ func NewIdentityProvider(repository *v1alpha1.Repository) identity.Provider {
 	case "k8s":
 		return identity.NewK8sProvider()
 	case "aws":
-		return identity.NewAWSProvider(repository.Repo)
+		return identity.NewAWSProvider(repository)
 	case "gcp":
 		return identity.NewGCPProvider(repository.Repo)
 	case "azure":
