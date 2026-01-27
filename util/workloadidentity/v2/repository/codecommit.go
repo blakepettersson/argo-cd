@@ -68,9 +68,9 @@ func (a *CodeCommitAuthenticator) Authenticate(ctx context.Context, token *Token
 	}
 
 	log.WithFields(log.Fields{
-		"region":         region,
-		"usernameLen":    len(username),
-		"passwordLen":    len(password),
+		"region":          region,
+		"usernameLen":     len(username),
+		"passwordLen":     len(password),
 		"hasSessionToken": token.AWSCredentials.SessionToken != "",
 	}).Info("CodeCommit: successfully generated Git credentials")
 
@@ -117,14 +117,13 @@ func (a *CodeCommitAuthenticator) generateSignedCredentials(accessKeyID, secretA
 	// Calculate the signature
 	signature := hex.EncodeToString(hmacSHA256(signingKey, stringToSign))
 
-	// Build credentials following git-remote-codecommit format:
-	// Username: AccessKeyID% (the '%' is a marker for temporary credentials, NOT the token value)
+	// Build credentials following gembaadvantage/codecommit-sign format:
+	// Username: URL-encode(AccessKeyID%SessionToken) - the entire string is encoded
 	// Password: timestampZsignature
-	// The session token is NOT transmitted - CodeCommit validates via STS on their end
 	if sessionToken != "" {
-		username = accessKeyID + "%"
+		username = url.QueryEscape(accessKeyID + "%" + sessionToken)
 	} else {
-		username = accessKeyID
+		username = url.QueryEscape(accessKeyID)
 	}
 	password = timestamp + "Z" + signature
 
