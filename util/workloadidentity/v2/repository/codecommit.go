@@ -117,12 +117,12 @@ func (a *CodeCommitAuthenticator) generateSignedCredentials(accessKeyID, secretA
 	// Calculate the signature
 	signature := hex.EncodeToString(hmacSHA256(signingKey, stringToSign))
 
-	// Build credentials
-	// Username format: AccessKeyID%SessionToken
-	// The session token is URL-encoded because it contains special chars (+, /, =)
+	// Build credentials following git-remote-codecommit format:
+	// Username: AccessKeyID% (the '%' is a marker for temporary credentials, NOT the token value)
 	// Password: timestampZsignature
+	// The session token is NOT transmitted - CodeCommit validates via STS on their end
 	if sessionToken != "" {
-		username = accessKeyID + "%" + url.QueryEscape(sessionToken)
+		username = accessKeyID + "%"
 	} else {
 		username = accessKeyID
 	}
