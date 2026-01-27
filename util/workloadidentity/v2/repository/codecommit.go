@@ -92,7 +92,8 @@ func (a *CodeCommitAuthenticator) generateSignedPassword(accessKeyID, secretAcce
 
 	// Create the string to sign
 	// For GRC, we sign a canonical request for the GIT protocol
-	canonicalRequest := fmt.Sprintf("GIT\n%s\n\nhost:%s\n\nhost\n", "/", host)
+	// Format matches git-remote-codecommit: no trailing newline
+	canonicalRequest := fmt.Sprintf("GIT\n%s\n\nhost:%s\n\nhost", "/", host)
 	canonicalRequestHash := sha256Hash(canonicalRequest)
 
 	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s",
