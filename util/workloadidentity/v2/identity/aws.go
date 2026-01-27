@@ -148,9 +148,6 @@ type AWSProvider struct {
 }
 
 func (p *AWSProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
-	if p.repo.Type == "git" {
-		return repository.NewCodeCommitAuthenticator()
-	}
 	return repository.NewECRAuthenticator()
 }
 

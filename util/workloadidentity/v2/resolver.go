@@ -62,8 +62,6 @@ func NewAuthenticator(authenticator string) repository.Authenticator {
 		return repository.NewACRAuthenticator()
 	case "http":
 		return repository.NewHTTPTemplateAuthenticator()
-	case "codecommit":
-		return repository.NewCodeCommitAuthenticator()
 	default:
 		return nil
 	}

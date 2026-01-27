@@ -108,7 +108,7 @@ func TestNewAuthenticator(t *testing.T) {
 		{name: "passthrough authenticator", authenticator: "passthrough", wantNil: false},
 		{name: "acr authenticator", authenticator: "acr", wantNil: false},
 		{name: "http authenticator", authenticator: "http", wantNil: false},
-		{name: "codecommit authenticator", authenticator: "codecommit", wantNil: false},
+		{name: "codecommit authenticator", authenticator: "codecommit", wantNil: true},
 		{name: "unknown authenticator", authenticator: "unknown", wantNil: true},
 		{name: "empty authenticator", authenticator: "", wantNil: true},
 	}
@@ -170,13 +170,13 @@ func TestResolveCredentials_ServiceAccountNotFound(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	resolver := NewResolver(clientset, "argocd")
 
-	provider := identity.NewAWSProvider("oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo")
-	repoAuth := repository.NewECRAuthenticator()
 	repo := &v1alpha1.Repository{
 		Repo:                     "oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo",
 		Project:                  "nonexistent",
 		WorkloadIdentityProvider: "aws",
 	}
+	provider := identity.NewAWSProvider(repo)
+	repoAuth := repository.NewECRAuthenticator()
 
 	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
 	require.Error(t, err)
@@ -205,13 +205,13 @@ func TestResolveCredentials_WithMock_TokenRequestFails(t *testing.T) {
 
 	resolver := &Resolver{serviceAccounts: mock}
 
-	provider := identity.NewAWSProvider("https://example.com")
-	repoAuth := repository.NewECRAuthenticator()
 	repo := &v1alpha1.Repository{
 		Repo:                     "https://example.com",
 		Project:                  "default",
 		WorkloadIdentityProvider: "aws",
 	}
+	provider := identity.NewAWSProvider(repo)
+	repoAuth := repository.NewECRAuthenticator()
 
 	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
 	require.Error(t, err)
@@ -243,13 +243,13 @@ func TestResolveCredentials_WithMock_AWSMissingRoleAnnotation(t *testing.T) {
 
 	resolver := &Resolver{serviceAccounts: mock}
 
-	provider := identity.NewAWSProvider("oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo")
-	repoAuth := repository.NewECRAuthenticator()
 	repo := &v1alpha1.Repository{
 		Repo:                     "oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo",
 		Project:                  "default",
 		WorkloadIdentityProvider: "aws",
 	}
+	provider := identity.NewAWSProvider(repo)
+	repoAuth := repository.NewECRAuthenticator()
 
 	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
 	require.Error(t, err)
@@ -286,13 +286,13 @@ func TestResolveCredentials_WithMock_GlobalServiceAccount(t *testing.T) {
 	resolver := &Resolver{serviceAccounts: mock}
 
 	// Use a provider that will fail (missing annotation) but we can still verify SA name lookup
-	provider := identity.NewAWSProvider("https://example.com")
-	repoAuth := repository.NewECRAuthenticator()
 	repo := &v1alpha1.Repository{
 		Repo:                     "https://example.com",
 		Project:                  "", // Empty project should use global SA
 		WorkloadIdentityProvider: "aws",
 	}
+	provider := identity.NewAWSProvider(repo)
+	repoAuth := repository.NewECRAuthenticator()
 
 	_, _ = resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
 	assert.Equal(t, "argocd-global", capturedSAName)
@@ -326,14 +326,14 @@ func TestResolveCredentials_WithMock_TokenAudience(t *testing.T) {
 
 	resolver := &Resolver{serviceAccounts: mock}
 
-	provider := identity.NewAWSProvider("https://example.com")
-	repoAuth := repository.NewECRAuthenticator()
 	repo := &v1alpha1.Repository{
 		Repo:                     "https://example.com",
 		Project:                  "default",
 		WorkloadIdentityProvider: "aws",
 		WorkloadIdentityAudience: "custom-audience",
 	}
+	provider := identity.NewAWSProvider(repo)
+	repoAuth := repository.NewECRAuthenticator()
 
 	_, _ = resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
 	require.Len(t, capturedAudiences, 1)

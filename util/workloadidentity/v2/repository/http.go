@@ -208,9 +208,6 @@ func (a *HTTPTemplateAuthenticator) Authenticate(ctx context.Context, token *Tok
 
 	// Determine username for credentials
 	username := config.Username
-	if username == "" {
-		username = "$oauthtoken"
-	}
 
 	log.WithFields(log.Fields{
 		"registry": registry,
@@ -260,19 +257,9 @@ func extractTokenFromResponse(body []byte, fieldName string) (string, error) {
 				return strVal, nil
 			}
 		}
-		return "", fmt.Errorf("field %q not found or empty in response", fieldName)
 	}
 
-	// Try common field names in order
-	for _, field := range []string{"access_token", "token", "refresh_token"} {
-		if val, ok := data[field]; ok {
-			if strVal, ok := val.(string); ok && strVal != "" {
-				return strVal, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("no token field found in response (tried access_token, token, refresh_token)")
+	return "", fmt.Errorf("field '%q' not found or empty in response", fieldName)
 }
 
 // parseRepoURL parses a repository URL and extracts the registry host and path.
