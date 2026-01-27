@@ -67,7 +67,12 @@ func (a *CodeCommitAuthenticator) Authenticate(ctx context.Context, token *Token
 		return nil, fmt.Errorf("failed to generate CodeCommit credentials: %w", err)
 	}
 
-	log.WithField("region", region).Info("CodeCommit: successfully generated Git credentials")
+	log.WithFields(log.Fields{
+		"region":         region,
+		"usernameLen":    len(username),
+		"passwordLen":    len(password),
+		"hasSessionToken": token.AWSCredentials.SessionToken != "",
+	}).Info("CodeCommit: successfully generated Git credentials")
 
 	return &Credentials{
 		Username: username,
@@ -113,12 +118,13 @@ func (a *CodeCommitAuthenticator) generateSignedCredentials(accessKeyID, secretA
 	signature := hex.EncodeToString(hmacSHA256(signingKey, stringToSign))
 
 	// Build credentials
-	// Username: AccessKeyID%SessionToken (URL-encoded)
+	// Username format: AccessKeyID%SessionToken
+	// The session token is URL-encoded because it contains special chars (+, /, =)
 	// Password: timestampZsignature
 	if sessionToken != "" {
-		username = url.QueryEscape(accessKeyID + "%" + sessionToken)
+		username = accessKeyID + "%" + url.QueryEscape(sessionToken)
 	} else {
-		username = url.QueryEscape(accessKeyID)
+		username = accessKeyID
 	}
 	password = timestamp + "Z" + signature
 
