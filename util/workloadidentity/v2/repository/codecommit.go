@@ -44,40 +44,44 @@ func (a *CodeCommitAuthenticator) Authenticate(ctx context.Context, token *Token
 		region = token.AWSCredentials.Region
 	}
 
+	// Extract the path from the URL (e.g., /v1/repos/my-repo)
+	repoPath := extractCodeCommitPath(repoURL)
+
 	log.WithFields(log.Fields{
-		"region":  region,
-		"repoURL": repoURL,
+		"region":   region,
+		"repoURL":  repoURL,
+		"repoPath": repoPath,
 	}).Info("CodeCommit: generating signed Git credentials")
 
-	// Generate the signed password using AWS SigV4
+	// Generate signed credentials using AWS SigV4
 	// This implements the GRC (Git Remote CodeCommit) credential helper protocol
-	password, err := a.generateSignedPassword(
+	username, password, err := a.generateSignedCredentials(
 		token.AWSCredentials.AccessKeyID,
 		token.AWSCredentials.SecretAccessKey,
 		token.AWSCredentials.SessionToken,
 		region,
+		repoPath,
 	)
 	if err != nil {
-		log.WithError(err).Error("CodeCommit: failed to generate signed password")
+		log.WithError(err).Error("CodeCommit: failed to generate signed credentials")
 		return nil, fmt.Errorf("failed to generate CodeCommit credentials: %w", err)
 	}
 
 	log.WithField("region", region).Info("CodeCommit: successfully generated Git credentials")
 
 	return &Credentials{
-		Username: token.AWSCredentials.AccessKeyID,
+		Username: username,
 		Password: password,
 	}, nil
 }
 
-// generateSignedPassword creates a signed password for CodeCommit HTTPS authentication.
+// generateSignedCredentials creates signed Git credentials for CodeCommit HTTPS authentication.
 // This implements the same signing process used by git-remote-codecommit.
 //
-// The password format encodes:
-// - Timestamp
-// - AWS Signature (SigV4)
-// - Session token (if present)
-func (a *CodeCommitAuthenticator) generateSignedPassword(accessKeyID, secretAccessKey, sessionToken, region string) (string, error) {
+// The credential format is:
+// - Username: AccessKeyID + "%" + SessionToken (URL-encoded)
+// - Password: timestamp + "Z" + signature
+func (a *CodeCommitAuthenticator) generateSignedCredentials(accessKeyID, secretAccessKey, sessionToken, region, repoPath string) (username, password string, err error) {
 	// Use current time for signing
 	now := time.Now().UTC()
 	dateStamp := now.Format("20060102")
@@ -90,10 +94,10 @@ func (a *CodeCommitAuthenticator) generateSignedPassword(accessKeyID, secretAcce
 	// Create the credential scope
 	credentialScope := fmt.Sprintf("%s/%s/%s/aws4_request", dateStamp, region, service)
 
-	// Create the string to sign
-	// For GRC, we sign a canonical request for the GIT protocol
-	// Format matches git-remote-codecommit: no trailing newline
-	canonicalRequest := fmt.Sprintf("GIT\n%s\n\nhost:%s\n\nhost", "/", host)
+	// Create the canonical request
+	// Format: METHOD\nPATH\nQUERY\nHEADERS\n\nSIGNED_HEADERS\n
+	// CodeCommit doesn't support query parameters or a payload, so omit both
+	canonicalRequest := fmt.Sprintf("GIT\n%s\n\nhost:%s\n\nhost\n", repoPath, host)
 	canonicalRequestHash := sha256Hash(canonicalRequest)
 
 	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s",
@@ -108,16 +112,17 @@ func (a *CodeCommitAuthenticator) generateSignedPassword(accessKeyID, secretAcce
 	// Calculate the signature
 	signature := hex.EncodeToString(hmacSHA256(signingKey, stringToSign))
 
-	// Build the password
-	// Format: timestamp + 'Z' + signature [+ '%' + session_token if present]
-	password := timestamp + "Z" + signature
-
+	// Build credentials
+	// Username: AccessKeyID%SessionToken (URL-encoded)
+	// Password: timestampZsignature
 	if sessionToken != "" {
-		// URL-encode the session token
-		password += "%" + url.QueryEscape(sessionToken)
+		username = url.QueryEscape(accessKeyID + "%" + sessionToken)
+	} else {
+		username = url.QueryEscape(accessKeyID)
 	}
+	password = timestamp + "Z" + signature
 
-	return password, nil
+	return username, password, nil
 }
 
 // getSignatureKey derives the signing key using AWS SigV4 key derivation
@@ -160,6 +165,25 @@ func extractCodeCommitRegion(repoURL string) string {
 	}
 
 	return ""
+}
+
+// extractCodeCommitPath extracts the path from a CodeCommit repository URL
+// Example: https://git-codecommit.us-west-2.amazonaws.com/v1/repos/my-repo → /v1/repos/my-repo
+func extractCodeCommitPath(repoURL string) string {
+	parsed, err := url.Parse(repoURL)
+	if err != nil {
+		// Fallback: try to extract path manually
+		repoURL = strings.TrimPrefix(repoURL, "https://")
+		repoURL = strings.TrimPrefix(repoURL, "http://")
+		if idx := strings.Index(repoURL, "/"); idx != -1 {
+			return repoURL[idx:]
+		}
+		return "/"
+	}
+	if parsed.Path == "" {
+		return "/"
+	}
+	return parsed.Path
 }
 
 // Ensure CodeCommitAuthenticator implements Authenticator
