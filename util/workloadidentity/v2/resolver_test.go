@@ -7,16 +7,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/identity"
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/mocks"
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 )
 
@@ -72,23 +67,104 @@ func TestNewResolver(t *testing.T) {
 }
 
 func TestNewIdentityProvider(t *testing.T) {
+	ctx := context.Background()
+	namespace := "argocd"
+
 	tests := []struct {
-		name    string
-		repo    *v1alpha1.Repository
-		wantNil bool
+		name      string
+		repo      *v1alpha1.Repository
+		saName    string
+		createSA  bool
+		wantNil   bool
+		wantError bool
 	}{
-		{name: "k8s provider", repo: &v1alpha1.Repository{Repo: "", WorkloadIdentityProvider: "k8s"}, wantNil: false},
-		{name: "aws provider", repo: &v1alpha1.Repository{Repo: "oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo", WorkloadIdentityProvider: "aws"}, wantNil: false},
-		{name: "gcp provider", repo: &v1alpha1.Repository{Repo: "oci://us-docker.pkg.dev/project/repo", WorkloadIdentityProvider: "gcp"}, wantNil: false},
-		{name: "azure provider", repo: &v1alpha1.Repository{Repo: "oci://myregistry.azurecr.io/repo", WorkloadIdentityProvider: "azure"}, wantNil: false},
-		{name: "spiffe provider", repo: &v1alpha1.Repository{Repo: "", WorkloadIdentityProvider: "spiffe"}, wantNil: false},
-		{name: "unknown provider", repo: &v1alpha1.Repository{WorkloadIdentityProvider: "unknown"}, wantNil: true},
-		{name: "empty provider", repo: &v1alpha1.Repository{}, wantNil: true},
+		{
+			name:     "spiffe provider - no SA needed",
+			repo:     &v1alpha1.Repository{Repo: "oci://registry.example.com/repo", WorkloadIdentityProvider: "spiffe"},
+			wantNil:  false,
+			createSA: false,
+		},
+		{
+			name:      "k8s provider - SA exists",
+			repo:      &v1alpha1.Repository{Repo: "", WorkloadIdentityProvider: "k8s", Project: "default"},
+			saName:    "argocd-project-default",
+			createSA:  true,
+			wantNil:   false,
+			wantError: false,
+		},
+		{
+			name:      "aws provider - SA exists",
+			repo:      &v1alpha1.Repository{Repo: "oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo", WorkloadIdentityProvider: "aws", Project: "default"},
+			saName:    "argocd-project-default",
+			createSA:  true,
+			wantNil:   false,
+			wantError: false,
+		},
+		{
+			name:      "gcp provider - SA exists",
+			repo:      &v1alpha1.Repository{Repo: "oci://us-docker.pkg.dev/project/repo", WorkloadIdentityProvider: "gcp", Project: "default"},
+			saName:    "argocd-project-default",
+			createSA:  true,
+			wantNil:   false,
+			wantError: false,
+		},
+		{
+			name:      "azure provider - SA exists",
+			repo:      &v1alpha1.Repository{Repo: "oci://myregistry.azurecr.io/repo", WorkloadIdentityProvider: "azure", Project: "default"},
+			saName:    "argocd-project-default",
+			createSA:  true,
+			wantNil:   false,
+			wantError: false,
+		},
+		{
+			name:      "k8s provider - SA does not exist",
+			repo:      &v1alpha1.Repository{Repo: "", WorkloadIdentityProvider: "k8s", Project: "nonexistent"},
+			saName:    "argocd-project-nonexistent",
+			createSA:  false,
+			wantNil:   false,
+			wantError: true,
+		},
+		{
+			name:      "unknown provider - returns nil",
+			repo:      &v1alpha1.Repository{WorkloadIdentityProvider: "unknown", Project: "default"},
+			saName:    "argocd-project-default",
+			createSA:  true,
+			wantNil:   true,
+			wantError: false,
+		},
+		{
+			name:      "empty provider - returns nil",
+			repo:      &v1alpha1.Repository{Project: "default"},
+			saName:    "argocd-project-default",
+			createSA:  true,
+			wantNil:   true,
+			wantError: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := NewIdentityProvider(tt.repo)
+			var clientset *fake.Clientset
+			if tt.createSA {
+				sa := &corev1.ServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.saName,
+						Namespace: namespace,
+					},
+				}
+				clientset = fake.NewSimpleClientset(sa)
+			} else {
+				clientset = fake.NewSimpleClientset()
+			}
+
+			provider, err := NewIdentityProvider(ctx, tt.repo, clientset, namespace)
+
+			if tt.wantError {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
 			if tt.wantNil {
 				assert.Nil(t, provider)
 			} else {
@@ -125,6 +201,35 @@ func TestNewAuthenticator(t *testing.T) {
 	}
 }
 
+// mockProvider is a test mock for identity.Provider
+type mockProvider struct {
+	getTokenFunc                      func(ctx context.Context, audience, tokenURL string) (*repository.Token, error)
+	defaultRepositoryAuthenticatorVal repository.Authenticator
+}
+
+func (m *mockProvider) GetToken(ctx context.Context, audience, tokenURL string) (*repository.Token, error) {
+	if m.getTokenFunc != nil {
+		return m.getTokenFunc(ctx, audience, tokenURL)
+	}
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
+	return m.defaultRepositoryAuthenticatorVal
+}
+
+// mockAuthenticator is a test mock for repository.Authenticator
+type mockAuthenticator struct {
+	authenticateFunc func(ctx context.Context, token *repository.Token, repoURL string, config *repository.Config) (*repository.Credentials, error)
+}
+
+func (m *mockAuthenticator) Authenticate(ctx context.Context, token *repository.Token, repoURL string, config *repository.Config) (*repository.Credentials, error) {
+	if m.authenticateFunc != nil {
+		return m.authenticateFunc(ctx, token, repoURL, config)
+	}
+	return nil, errors.New("not implemented")
+}
+
 func TestResolveCredentials_NilProvider(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	resolver := NewResolver(clientset, "argocd")
@@ -144,7 +249,7 @@ func TestResolveCredentials_NilAuthenticator(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	resolver := NewResolver(clientset, "argocd")
 
-	provider := identity.NewK8sProvider()
+	provider := &mockProvider{}
 	repo := &v1alpha1.Repository{
 		Repo:                     "https://example.com",
 		Project:                  "default",
@@ -159,183 +264,184 @@ func TestResolveCredentials_NilRepo(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	resolver := NewResolver(clientset, "argocd")
 
-	provider := identity.NewK8sProvider()
+	provider := &mockProvider{}
 	repoAuth := repository.NewHTTPTemplateAuthenticator()
 	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "repository is required")
 }
 
-func TestResolveCredentials_ServiceAccountNotFound(t *testing.T) {
+func TestResolveCredentials_ProviderTokenError(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	resolver := NewResolver(clientset, "argocd")
 
-	repo := &v1alpha1.Repository{
-		Repo:                     "oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo",
-		Project:                  "nonexistent",
-		WorkloadIdentityProvider: "aws",
-	}
-	provider := identity.NewAWSProvider(repo)
-	repoAuth := repository.NewECRAuthenticator()
-
-	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to get service account")
-}
-
-func TestResolveCredentials_WithMock_TokenRequestFails(t *testing.T) {
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "argocd-project-default",
-			Namespace: "argocd",
-			Annotations: map[string]string{
-				AnnotationAWSRoleARN: "arn:aws:iam::123456789012:role/test-role",
-			},
-		},
-	}
-
-	mock := &mocks.ServiceAccountInterface{
-		GetFunc: func(ctx context.Context, name string, opts metav1.GetOptions) (*corev1.ServiceAccount, error) {
-			return sa, nil
-		},
-		CreateTokenFunc: func(ctx context.Context, serviceAccountName string, tokenRequest *authv1.TokenRequest, opts metav1.CreateOptions) (*authv1.TokenRequest, error) {
+	provider := &mockProvider{
+		getTokenFunc: func(ctx context.Context, audience, tokenURL string) (*repository.Token, error) {
 			return nil, errors.New("token request denied")
 		},
 	}
 
-	resolver := &Resolver{serviceAccounts: mock}
-
 	repo := &v1alpha1.Repository{
 		Repo:                     "https://example.com",
 		Project:                  "default",
 		WorkloadIdentityProvider: "aws",
 	}
-	provider := identity.NewAWSProvider(repo)
 	repoAuth := repository.NewECRAuthenticator()
 
 	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to request k8s token")
+	assert.Contains(t, err.Error(), "identity provider failed")
 	assert.Contains(t, err.Error(), "token request denied")
 }
 
-func TestResolveCredentials_WithMock_AWSMissingRoleAnnotation(t *testing.T) {
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "argocd-project-default",
-			Namespace: "argocd",
-			// Missing eks.amazonaws.com/role-arn annotation
-		},
-	}
+func TestResolveCredentials_AuthenticatorError(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	resolver := NewResolver(clientset, "argocd")
 
-	mock := &mocks.ServiceAccountInterface{
-		GetFunc: func(ctx context.Context, name string, opts metav1.GetOptions) (*corev1.ServiceAccount, error) {
-			return sa, nil
-		},
-		CreateTokenFunc: func(ctx context.Context, serviceAccountName string, tokenRequest *authv1.TokenRequest, opts metav1.CreateOptions) (*authv1.TokenRequest, error) {
-			return &authv1.TokenRequest{
-				Status: authv1.TokenRequestStatus{
-					Token: "test-k8s-token",
-				},
+	provider := &mockProvider{
+		getTokenFunc: func(ctx context.Context, audience, tokenURL string) (*repository.Token, error) {
+			return &repository.Token{
+				Type:  repository.TokenTypeBearer,
+				Token: "test-token",
 			}, nil
 		},
 	}
 
-	resolver := &Resolver{serviceAccounts: mock}
+	repoAuth := &mockAuthenticator{
+		authenticateFunc: func(ctx context.Context, token *repository.Token, repoURL string, config *repository.Config) (*repository.Credentials, error) {
+			return nil, errors.New("authentication failed")
+		},
+	}
 
 	repo := &v1alpha1.Repository{
-		Repo:                     "oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo",
+		Repo:                     "https://example.com",
 		Project:                  "default",
 		WorkloadIdentityProvider: "aws",
 	}
-	provider := identity.NewAWSProvider(repo)
-	repoAuth := repository.NewECRAuthenticator()
 
 	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing")
-	assert.Contains(t, err.Error(), AnnotationAWSRoleARN)
+	assert.Contains(t, err.Error(), "authentication failed")
 }
 
-func TestResolveCredentials_WithMock_GlobalServiceAccount(t *testing.T) {
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "argocd-global",
-			Namespace: "argocd",
-		},
-	}
+func TestResolveCredentials_Success(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	resolver := NewResolver(clientset, "argocd")
 
-	var capturedSAName string
-	mock := &mocks.ServiceAccountInterface{
-		GetFunc: func(ctx context.Context, name string, opts metav1.GetOptions) (*corev1.ServiceAccount, error) {
-			capturedSAName = name
-			if name == "argocd-global" {
-				return sa, nil
-			}
-			return nil, apierrors.NewNotFound(schema.GroupResource{Group: "", Resource: "serviceaccounts"}, name)
-		},
-		CreateTokenFunc: func(ctx context.Context, serviceAccountName string, tokenRequest *authv1.TokenRequest, opts metav1.CreateOptions) (*authv1.TokenRequest, error) {
-			return &authv1.TokenRequest{
-				Status: authv1.TokenRequestStatus{
-					Token: "test-k8s-token",
-				},
+	provider := &mockProvider{
+		getTokenFunc: func(ctx context.Context, audience, tokenURL string) (*repository.Token, error) {
+			return &repository.Token{
+				Type:  repository.TokenTypeBearer,
+				Token: "test-token",
 			}, nil
 		},
 	}
 
-	resolver := &Resolver{serviceAccounts: mock}
+	repoAuth := &mockAuthenticator{
+		authenticateFunc: func(ctx context.Context, token *repository.Token, repoURL string, config *repository.Config) (*repository.Credentials, error) {
+			return &repository.Credentials{
+				Username: "user",
+				Password: "pass",
+			}, nil
+		},
+	}
 
-	// Use a provider that will fail (missing annotation) but we can still verify SA name lookup
 	repo := &v1alpha1.Repository{
 		Repo:                     "https://example.com",
-		Project:                  "", // Empty project should use global SA
+		Project:                  "default",
 		WorkloadIdentityProvider: "aws",
 	}
-	provider := identity.NewAWSProvider(repo)
-	repoAuth := repository.NewECRAuthenticator()
 
-	_, _ = resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
-	assert.Equal(t, "argocd-global", capturedSAName)
+	creds, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
+	require.NoError(t, err)
+	assert.Equal(t, "user", creds.Username)
+	assert.Equal(t, "pass", creds.Password)
 }
 
-func TestResolveCredentials_WithMock_TokenAudience(t *testing.T) {
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "argocd-project-default",
-			Namespace: "argocd",
-			Annotations: map[string]string{
-				AnnotationAWSRoleARN: "arn:aws:iam::123456789012:role/test-role",
-			},
-		},
-	}
+func TestResolveCredentials_PassesConfigToAuthenticator(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	resolver := NewResolver(clientset, "argocd")
 
-	var capturedAudiences []string
-	mock := &mocks.ServiceAccountInterface{
-		GetFunc: func(ctx context.Context, name string, opts metav1.GetOptions) (*corev1.ServiceAccount, error) {
-			return sa, nil
-		},
-		CreateTokenFunc: func(ctx context.Context, serviceAccountName string, tokenRequest *authv1.TokenRequest, opts metav1.CreateOptions) (*authv1.TokenRequest, error) {
-			capturedAudiences = tokenRequest.Spec.Audiences
-			return &authv1.TokenRequest{
-				Status: authv1.TokenRequestStatus{
-					Token: "test-k8s-token",
-				},
+	provider := &mockProvider{
+		getTokenFunc: func(ctx context.Context, audience, tokenURL string) (*repository.Token, error) {
+			return &repository.Token{
+				Type:  repository.TokenTypeBearer,
+				Token: "test-token",
 			}, nil
 		},
 	}
 
-	resolver := &Resolver{serviceAccounts: mock}
+	var capturedConfig *repository.Config
+	repoAuth := &mockAuthenticator{
+		authenticateFunc: func(ctx context.Context, token *repository.Token, repoURL string, config *repository.Config) (*repository.Credentials, error) {
+			capturedConfig = config
+			return &repository.Credentials{Username: "user", Password: "pass"}, nil
+		},
+	}
+
+	repo := &v1alpha1.Repository{
+		Repo:                           "https://example.com",
+		Project:                        "default",
+		WorkloadIdentityProvider:       "aws",
+		WorkloadIdentityUsername:       "custom-user",
+		Insecure:                       true,
+		WorkloadIdentityAuthHost:       "auth.example.com",
+		WorkloadIdentityMethod:         "POST",
+		WorkloadIdentityPathTemplate:   "/api/token",
+		WorkloadIdentityBodyTemplate:   `{"token": "{{.Token}}"}`,
+		WorkloadIdentityAuthType:       "bearer",
+		WorkloadIdentityParams:         map[string]string{"param1": "value1"},
+		WorkloadIdentityResponseTokenField: "access_token",
+	}
+
+	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
+	require.NoError(t, err)
+
+	require.NotNil(t, capturedConfig)
+	assert.Equal(t, "custom-user", capturedConfig.Username)
+	assert.True(t, capturedConfig.Insecure)
+	assert.Equal(t, "auth.example.com", capturedConfig.AuthHost)
+	assert.Equal(t, "POST", capturedConfig.Method)
+	assert.Equal(t, "/api/token", capturedConfig.PathTemplate)
+	assert.Equal(t, `{"token": "{{.Token}}"}`, capturedConfig.BodyTemplate)
+	assert.Equal(t, "bearer", capturedConfig.AuthType)
+	assert.Equal(t, map[string]string{"param1": "value1"}, capturedConfig.Params)
+	assert.Equal(t, "access_token", capturedConfig.ResponseTokenField)
+}
+
+func TestResolveCredentials_PassesAudienceAndTokenURL(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	resolver := NewResolver(clientset, "argocd")
+
+	var capturedAudience, capturedTokenURL string
+	provider := &mockProvider{
+		getTokenFunc: func(ctx context.Context, audience, tokenURL string) (*repository.Token, error) {
+			capturedAudience = audience
+			capturedTokenURL = tokenURL
+			return &repository.Token{
+				Type:  repository.TokenTypeBearer,
+				Token: "test-token",
+			}, nil
+		},
+	}
+
+	repoAuth := &mockAuthenticator{
+		authenticateFunc: func(ctx context.Context, token *repository.Token, repoURL string, config *repository.Config) (*repository.Credentials, error) {
+			return &repository.Credentials{Username: "user", Password: "pass"}, nil
+		},
+	}
 
 	repo := &v1alpha1.Repository{
 		Repo:                     "https://example.com",
 		Project:                  "default",
 		WorkloadIdentityProvider: "aws",
 		WorkloadIdentityAudience: "custom-audience",
+		WorkloadIdentityTokenURL: "https://custom-sts.example.com",
 	}
-	provider := identity.NewAWSProvider(repo)
-	repoAuth := repository.NewECRAuthenticator()
 
-	_, _ = resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
-	require.Len(t, capturedAudiences, 1)
-	assert.Equal(t, "custom-audience", capturedAudiences[0])
+	_, err := resolver.ResolveCredentials(context.Background(), provider, repoAuth, repo)
+	require.NoError(t, err)
+
+	assert.Equal(t, "custom-audience", capturedAudience)
+	assert.Equal(t, "https://custom-sts.example.com", capturedTokenURL)
 }

@@ -131,7 +131,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	log "github.com/sirupsen/logrus"
-	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -145,6 +144,7 @@ const (
 // AWSProvider exchanges K8s JWTs for AWS credentials via STS
 type AWSProvider struct {
 	repo *v1alpha1.Repository
+	k8s  *K8sProvider
 }
 
 func (p *AWSProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
@@ -152,28 +152,29 @@ func (p *AWSProvider) DefaultRepositoryAuthenticator() repository.Authenticator 
 }
 
 // NewAWSProvider creates a new AWS identity provider
-func NewAWSProvider(repo *v1alpha1.Repository) *AWSProvider {
+func NewAWSProvider(repo *v1alpha1.Repository, k8s *K8sProvider) *AWSProvider {
 	return &AWSProvider{
 		repo: repo,
+		k8s:  k8s,
 	}
 }
 
 // GetToken exchanges a K8s JWT for AWS credentials
-func (p *AWSProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, requestToken TokenRequester, cfg *Config) (*repository.Token, error) {
+func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL string) (*repository.Token, error) {
 	// Get role ARN from standard EKS annotation on service account
-	roleARN := sa.Annotations[AnnotationAWSRoleARN]
+	saName := p.k8s.sa.Name
+	roleARN := p.k8s.sa.Annotations[AnnotationAWSRoleARN]
 	if roleARN == "" {
-		return nil, fmt.Errorf("service account %s missing %s annotation", sa.Name, AnnotationAWSRoleARN)
+		return nil, fmt.Errorf("service account %s missing %s annotation", saName, AnnotationAWSRoleARN)
 	}
 
 	// Use configured audience or default to STS
-	audience := cfg.Audience
 	if audience == "" {
 		audience = DefaultAWSAudience
 	}
 
 	// Request K8s token with STS audience
-	k8sToken, err := requestToken(ctx, audience)
+	k8sToken, err := p.k8s.GetToken(ctx, audience, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to request K8s token: %w", err)
 	}
@@ -182,13 +183,13 @@ func (p *AWSProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, r
 	region := extractAWSRegion(p.repo.Repo)
 
 	log.WithFields(log.Fields{
-		"serviceAccount": sa.Name,
+		"serviceAccount": saName,
 		"roleARN":        roleARN,
 		"region":         region,
 	}).Info("AWS IRSA: assuming IAM role with web identity")
 
 	// Check for optional STS endpoint override (for GovCloud, China, etc.) from repository config
-	stsEndpoint := cfg.TokenURL
+	stsEndpoint := tokenURL
 	if stsEndpoint != "" {
 		log.WithField("stsEndpoint", stsEndpoint).Debug("AWS IRSA: using custom STS endpoint")
 	}
@@ -209,7 +210,7 @@ func (p *AWSProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, r
 	stsClient := sts.NewFromConfig(awsCfg, stsOpts...)
 
 	// Assume role with web identity using the K8s JWT
-	roleSessionName := fmt.Sprintf("argocd-%s", sa.Name)
+	roleSessionName := fmt.Sprintf("argocd-%s", saName)
 	durationSeconds := int32(3600)
 	log.WithFields(log.Fields{
 		"roleSessionName": roleSessionName,
@@ -217,7 +218,7 @@ func (p *AWSProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, r
 
 	assumeResult, err := stsClient.AssumeRoleWithWebIdentity(ctx, &sts.AssumeRoleWithWebIdentityInput{
 		RoleArn:          aws.String(roleARN),
-		WebIdentityToken: aws.String(k8sToken),
+		WebIdentityToken: aws.String(k8sToken.Token),
 		RoleSessionName:  aws.String(roleSessionName),
 		DurationSeconds:  &durationSeconds,
 	})

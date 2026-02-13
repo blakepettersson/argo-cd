@@ -29,6 +29,7 @@ type SPIFFEProvider struct {
 	SocketPath string
 	// repoURL is used to derive default audience from registry host
 	repoURL string
+	sa      *corev1.ServiceAccount
 }
 
 func (p *SPIFFEProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
@@ -36,18 +37,19 @@ func (p *SPIFFEProvider) DefaultRepositoryAuthenticator() repository.Authenticat
 }
 
 // NewSPIFFEProvider creates a new SPIFFE identity provider
-func NewSPIFFEProvider(repoURL string) *SPIFFEProvider {
+func NewSPIFFEProvider(repoURL string, sa *corev1.ServiceAccount) *SPIFFEProvider {
 	return &SPIFFEProvider{
+		sa:      sa,
 		repoURL: repoURL,
 	}
 }
 
 // GetToken fetches a SPIFFE JWT-SVID for the given audience.
 // Note: requestToken is not used - SPIFFE uses its own attestation.
-func (p *SPIFFEProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, _ TokenRequester, config *Config) (*repository.Token, error) {
-	// SPIFFE uses its own workload attestation, not K8s tokens
+func (p *SPIFFEProvider) GetToken(ctx context.Context, audience string, _ string) (*repository.Token, error) {
+	sa := p.sa
 
-	audience := config.Audience
+	// SPIFFE uses its own workload attestation, not K8s tokens
 	if audience == "" {
 		// Default to registry host from repo URL
 		if p.repoURL != "" {

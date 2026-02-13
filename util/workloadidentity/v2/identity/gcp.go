@@ -95,6 +95,7 @@ const (
 // GCPProvider exchanges K8s JWTs for GCP access tokens via Workload Identity Federation
 type GCPProvider struct {
 	repoURL string
+	k8s     *K8sProvider
 }
 
 func (p *GCPProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
@@ -102,15 +103,18 @@ func (p *GCPProvider) DefaultRepositoryAuthenticator() repository.Authenticator 
 }
 
 // NewGCPProvider creates a new GCP identity provider
-func NewGCPProvider(repoURL string) *GCPProvider {
+func NewGCPProvider(repoURL string, k8s *K8sProvider) *GCPProvider {
 	return &GCPProvider{
 		repoURL: repoURL,
+		k8s:     k8s,
 	}
 }
 
 // GetToken exchanges a K8s JWT for GCP credentials
-func (p *GCPProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, requestToken TokenRequester, cfg *Config) (*repository.Token, error) {
-	log.Infof("resolveGCP: SA=%s/%s, annotations=%v, config.Audience=%q", sa.Namespace, sa.Name, sa.Annotations, cfg.Audience)
+func (p *GCPProvider) GetToken(ctx context.Context, audience string, tokenURL string) (*repository.Token, error) {
+	sa := p.k8s.sa
+
+	log.Infof("resolveGCP: SA=%s/%s, annotations=%v, config.Audience=%q", sa.Namespace, sa.Name, sa.Annotations, audience)
 
 	// Get GCP service account from standard GKE annotation
 	gcpSA := sa.Annotations[AnnotationGCPSA]
@@ -125,7 +129,7 @@ func (p *GCPProvider) GetToken(ctx context.Context, sa *corev1.ServiceAccount, r
 	if err != nil {
 		log.Infof("resolveGCP: metadata server approach failed: %v, trying STS", err)
 		// Fall back to STS token exchange (for Workload Identity Federation)
-		accessToken, err = p.resolveGCPViaSTS(ctx, sa, requestToken, gcpSA, cfg)
+		accessToken, err = p.resolveGCPViaSTS(ctx, sa, gcpSA, audience, tokenURL)
 		if err != nil {
 			return nil, err
 		}
@@ -172,9 +176,8 @@ func (p *GCPProvider) resolveGCPViaMetadata(ctx context.Context, targetSA string
 }
 
 // resolveGCPViaSTS uses STS token exchange for Workload Identity Federation
-func (p *GCPProvider) resolveGCPViaSTS(ctx context.Context, sa *corev1.ServiceAccount, requestToken TokenRequester, gcpSA string, config *Config) (string, error) {
+func (p *GCPProvider) resolveGCPViaSTS(ctx context.Context, sa *corev1.ServiceAccount, gcpSA string, audience string, tokenURL string) (string, error) {
 	// Get the workload identity provider audience
-	audience := config.Audience
 	if audience == "" {
 		audience = sa.Annotations[AnnotationGCPWorkloadIdentity]
 	}
@@ -185,13 +188,13 @@ func (p *GCPProvider) resolveGCPViaSTS(ctx context.Context, sa *corev1.ServiceAc
 	log.Infof("resolveGCPViaSTS: using audience=%q", audience)
 
 	// Step 1: Request K8s token with the GCP audience
-	k8sToken, err := requestToken(ctx, audience)
+	k8sToken, err := p.k8s.GetToken(ctx, audience, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to request K8s token: %w", err)
 	}
 
 	// Step 2: Exchange K8s token with GCP STS for a federated token
-	federatedToken, err := p.exchangeTokenWithSTS(ctx, k8sToken, audience, config.TokenURL)
+	federatedToken, err := p.exchangeTokenWithSTS(ctx, k8sToken.Token, audience, tokenURL)
 	if err != nil {
 		return "", fmt.Errorf("STS token exchange failed: %w", err)
 	}

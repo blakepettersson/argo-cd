@@ -5,11 +5,11 @@ import (
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/identity"
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
@@ -33,20 +33,31 @@ func NewResolver(clientset kubernetes.Interface, namespace string) *Resolver {
 
 // NewIdentityProvider creates an identity provider based on the provider name.
 // This is a convenience function for callers who don't want to manage provider instantiation.
-func NewIdentityProvider(repository *v1alpha1.Repository) identity.Provider {
+func NewIdentityProvider(ctx context.Context, repository *v1alpha1.Repository, clientset kubernetes.Interface, ns string) (identity.Provider, error) {
+	saName := getServiceAccountName(repository.Project)
+
+	serviceAccounts := clientset.CoreV1().ServiceAccounts(ns)
+	sa, err := serviceAccounts.Get(ctx, saName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service account %s: %w", saName, err)
+	}
+
+	if repository.WorkloadIdentityProvider == "spiffe" {
+		return identity.NewSPIFFEProvider(repository.Repo, sa), nil
+	}
+
+	k8sProvider := identity.NewK8sProvider(clientset, ns, sa)
 	switch repository.WorkloadIdentityProvider {
 	case "k8s":
-		return identity.NewK8sProvider()
+		return k8sProvider, nil
 	case "aws":
-		return identity.NewAWSProvider(repository)
+		return identity.NewAWSProvider(repository, k8sProvider), nil
 	case "gcp":
-		return identity.NewGCPProvider(repository.Repo)
+		return identity.NewGCPProvider(repository.Repo, k8sProvider), nil
 	case "azure":
-		return identity.NewAzureProvider(repository)
-	case "spiffe":
-		return identity.NewSPIFFEProvider(repository.Repo)
+		return identity.NewAzureProvider(repository, k8sProvider), nil
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -99,30 +110,8 @@ func (r *Resolver) ResolveCredentials(ctx context.Context, idProvider identity.P
 	saName := getServiceAccountName(repo.Project)
 	log.WithField("serviceAccount", saName).Debug("using service account for workload identity")
 
-	// Get service account (for its identity and cloud provider role annotations)
-	sa, err := r.serviceAccounts.Get(ctx, saName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get service account %s: %w", saName, err)
-	}
-	log.WithField("serviceAccount", saName).Debug("fetched service account")
-
-	// Create a token requester that providers can use to request K8s tokens with specific audiences
-	tokenRequester := func(ctx context.Context, audience string) (string, error) {
-		log.WithField("audience", audience).Debug("requesting K8s service account token")
-		token, err := r.requestToken(ctx, sa, audience)
-		if err != nil {
-			return "", fmt.Errorf("failed to request k8s token: %w", err)
-		}
-		log.Debug("obtained K8s service account token")
-		return token, nil
-	}
-
 	log.Info("exchanging credentials with identity provider")
-	idToken, err := idProvider.GetToken(ctx, sa, tokenRequester, &identity.Config{
-		Audience: repo.WorkloadIdentityAudience,
-		TokenURL: repo.WorkloadIdentityTokenURL,
-		Insecure: repo.Insecure,
-	})
+	idToken, err := idProvider.GetToken(ctx, repo.WorkloadIdentityAudience, repo.WorkloadIdentityTokenURL)
 	if err != nil {
 		return nil, fmt.Errorf("identity provider failed: %w", err)
 	}

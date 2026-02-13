@@ -480,7 +480,10 @@ func (db *db) enrichWorkloadIdentity(ctx context.Context, repository *v1alpha1.R
 	resolver := workloadidentity.NewResolver(db.kubeclientset, db.ns)
 
 	// Create workload identity resolver
-	provider := workloadidentity.NewIdentityProvider(repository)
+	provider, err := workloadidentity.NewIdentityProvider(ctx, repository, db.kubeclientset, db.ns)
+	if err != nil {
+		return err
+	}
 
 	// TODO: Add ability to choose authenticator from the repository?
 	authenticator := provider.DefaultRepositoryAuthenticator()

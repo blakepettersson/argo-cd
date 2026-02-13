@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // Config holds identity provider configuration
@@ -37,7 +36,7 @@ type Provider interface {
 	//
 	// The provider calls requestToken with the audience it needs (e.g., "sts.amazonaws.com").
 	// Returns an identity token that can be used by a RepositoryAuthenticator.
-	GetToken(ctx context.Context, sa *corev1.ServiceAccount, requestToken TokenRequester, config *Config) (*repository.Token, error)
+	GetToken(ctx context.Context, audience, tokenURL string) (*repository.Token, error)
 
 	DefaultRepositoryAuthenticator() repository.Authenticator
 }
