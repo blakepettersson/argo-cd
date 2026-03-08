@@ -125,12 +125,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 )
 
 const (
@@ -210,7 +211,7 @@ func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL st
 	stsClient := sts.NewFromConfig(awsCfg, stsOpts...)
 
 	// Assume role with web identity using the K8s JWT
-	roleSessionName := fmt.Sprintf("argocd-%s", saName)
+	roleSessionName := "argocd-" + saName
 	durationSeconds := int32(3600)
 	log.WithFields(log.Fields{
 		"roleSessionName": roleSessionName,

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -29,7 +30,7 @@ func (a *ECRAuthenticator) Authenticate(ctx context.Context, token *Token, repoU
 	}
 
 	if token.AWSCredentials == nil {
-		return nil, fmt.Errorf("AWS credentials are nil")
+		return nil, errors.New("AWS credentials are nil")
 	}
 
 	log.WithField("region", token.AWSCredentials.Region).Info("ECR: requesting authorization token")
@@ -57,7 +58,7 @@ func (a *ECRAuthenticator) Authenticate(ctx context.Context, token *Token, repoU
 	}
 
 	if len(authResult.AuthorizationData) == 0 {
-		return nil, fmt.Errorf("no ECR authorization data returned")
+		return nil, errors.New("no ECR authorization data returned")
 	}
 
 	// Decode the base64-encoded authorization token
@@ -69,7 +70,7 @@ func (a *ECRAuthenticator) Authenticate(ctx context.Context, token *Token, repoU
 	// ECR token format is "username:password"
 	parts := strings.SplitN(string(decoded), ":", 2)
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid ECR authorization token format")
+		return nil, errors.New("invalid ECR authorization token format")
 	}
 
 	log.WithField("region", token.AWSCredentials.Region).Info("ECR: successfully obtained authorization token")

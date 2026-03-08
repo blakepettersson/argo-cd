@@ -75,9 +75,10 @@ import (
 	"net/url"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -188,7 +189,7 @@ func (p *AzureProvider) getAzureAccessToken(ctx context.Context, tokenURL, clien
 	data.Set("grant_type", "client_credentials")
 
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}

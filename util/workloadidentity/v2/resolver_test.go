@@ -380,17 +380,17 @@ func TestResolveCredentials_PassesConfigToAuthenticator(t *testing.T) {
 	}
 
 	repo := &v1alpha1.Repository{
-		Repo:                           "https://example.com",
-		Project:                        "default",
-		WorkloadIdentityProvider:       "aws",
-		WorkloadIdentityUsername:       "custom-user",
-		Insecure:                       true,
-		WorkloadIdentityAuthHost:       "auth.example.com",
-		WorkloadIdentityMethod:         "POST",
-		WorkloadIdentityPathTemplate:   "/api/token",
-		WorkloadIdentityBodyTemplate:   `{"token": "{{.Token}}"}`,
-		WorkloadIdentityAuthType:       "bearer",
-		WorkloadIdentityParams:         map[string]string{"param1": "value1"},
+		Repo:                               "https://example.com",
+		Project:                            "default",
+		WorkloadIdentityProvider:           "aws",
+		WorkloadIdentityUsername:           "custom-user",
+		Insecure:                           true,
+		WorkloadIdentityAuthHost:           "auth.example.com",
+		WorkloadIdentityMethod:             "POST",
+		WorkloadIdentityPathTemplate:       "/api/token",
+		WorkloadIdentityBodyTemplate:       `{"token": "{{.Token}}"}`,
+		WorkloadIdentityAuthType:           "bearer",
+		WorkloadIdentityParams:             map[string]string{"param1": "value1"},
 		WorkloadIdentityResponseTokenField: "access_token",
 	}
 
@@ -403,7 +403,7 @@ func TestResolveCredentials_PassesConfigToAuthenticator(t *testing.T) {
 	assert.Equal(t, "auth.example.com", capturedConfig.AuthHost)
 	assert.Equal(t, "POST", capturedConfig.Method)
 	assert.Equal(t, "/api/token", capturedConfig.PathTemplate)
-	assert.Equal(t, `{"token": "{{.Token}}"}`, capturedConfig.BodyTemplate)
+	assert.JSONEq(t, `{"token": "{{.Token}}"}`, capturedConfig.BodyTemplate)
 	assert.Equal(t, "bearer", capturedConfig.AuthType)
 	assert.Equal(t, map[string]string{"param1": "value1"}, capturedConfig.Params)
 	assert.Equal(t, "access_token", capturedConfig.ResponseTokenField)

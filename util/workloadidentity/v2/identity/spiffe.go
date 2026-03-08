@@ -2,16 +2,18 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 	log "github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 )
 
 const (
@@ -59,7 +61,7 @@ func (p *SPIFFEProvider) GetToken(ctx context.Context, audience string, _ string
 		}
 	}
 	if audience == "" {
-		return nil, fmt.Errorf("could not determine audience: set workloadIdentityAudience or provide a valid repo URL")
+		return nil, errors.New("could not determine audience: set workloadIdentityAudience or provide a valid repo URL")
 	}
 
 	log.WithFields(log.Fields{
@@ -123,7 +125,7 @@ func buildSPIFFEID(ctx context.Context, namespace, serviceAccountName string) (s
 	}
 
 	if len(x509Ctx.SVIDs) == 0 {
-		return spiffeid.ID{}, fmt.Errorf("no X509-SVIDs returned from SPIFFE workload API")
+		return spiffeid.ID{}, errors.New("no X509-SVIDs returned from SPIFFE workload API")
 	}
 
 	// Get trust domain from the workload's own SVID
@@ -174,7 +176,7 @@ func fetchSPIFFEJWT(ctx context.Context, audience string, subjectSPIFFEID spiffe
 	}
 
 	if svid == nil {
-		return "", fmt.Errorf("no JWT-SVID returned from SPIFFE workload API")
+		return "", errors.New("no JWT-SVID returned from SPIFFE workload API")
 	}
 
 	return svid.Marshal(), nil

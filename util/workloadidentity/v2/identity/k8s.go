@@ -4,13 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 	log "github.com/sirupsen/logrus"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
+
+	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 )
 
 // K8sProvider passes through the K8s service account JWT directly.

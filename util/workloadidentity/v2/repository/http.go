@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,10 +80,10 @@ func (a *HTTPTemplateAuthenticator) Authenticate(ctx context.Context, token *Tok
 		return nil, fmt.Errorf("http template authenticator requires a bearer token, got %s", token.Type)
 	}
 	if token.Token == "" {
-		return nil, fmt.Errorf("empty bearer token")
+		return nil, errors.New("empty bearer token")
 	}
 	if config.PathTemplate == "" {
-		return nil, fmt.Errorf("pathTemplate is required for HTTP template authenticator")
+		return nil, errors.New("pathTemplate is required for HTTP template authenticator")
 	}
 
 	// Parse repo URL to extract registry and path
@@ -167,7 +168,7 @@ func (a *HTTPTemplateAuthenticator) Authenticate(ctx context.Context, token *Tok
 	switch authType {
 	case "basic":
 		if config.Username == "" {
-			return nil, fmt.Errorf("username is required for basic auth")
+			return nil, errors.New("username is required for basic auth")
 		}
 		req.SetBasicAuth(config.Username, token.Token)
 	case "none":

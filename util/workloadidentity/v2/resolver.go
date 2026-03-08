@@ -2,16 +2,18 @@ package v2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
+
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/identity"
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
-	"k8s.io/client-go/kubernetes"
-	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 // Standard cloud provider annotation fields (on service accounts)
@@ -92,13 +94,13 @@ func NewAuthenticator(authenticator string) repository.Authenticator {
 // 4. Return username/password for repo-server to use
 func (r *Resolver) ResolveCredentials(ctx context.Context, idProvider identity.Provider, repoAuth repository.Authenticator, repo *v1alpha1.Repository) (*repository.Credentials, error) {
 	if idProvider == nil {
-		return nil, fmt.Errorf("identity provider is required")
+		return nil, errors.New("identity provider is required")
 	}
 	if repoAuth == nil {
-		return nil, fmt.Errorf("repository authenticator is required")
+		return nil, errors.New("repository authenticator is required")
 	}
 	if repo == nil {
-		return nil, fmt.Errorf("repository is required")
+		return nil, errors.New("repository is required")
 	}
 
 	log.WithFields(log.Fields{
@@ -146,5 +148,5 @@ func getServiceAccountName(projectName string) string {
 	if projectName == "" {
 		return "argocd-global"
 	}
-	return fmt.Sprintf("argocd-project-%s", projectName)
+	return "argocd-project-" + projectName
 }

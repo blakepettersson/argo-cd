@@ -75,9 +75,10 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/argoproj/argo-cd/v3/util/workloadidentity/v2/repository"
 )
 
 const (
@@ -145,7 +146,7 @@ func (p *GCPProvider) GetToken(ctx context.Context, audience string, tokenURL st
 // resolveGCPViaMetadata uses the GKE metadata server to get a token, then impersonates the target SA
 func (p *GCPProvider) resolveGCPViaMetadata(ctx context.Context, targetSA string) (string, error) {
 	// Get token from metadata server (this is the pod's own GCP identity)
-	req, err := http.NewRequestWithContext(ctx, "GET", GCPMetadataTokenURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, GCPMetadataTokenURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create metadata request: %w", err)
 	}
@@ -219,7 +220,7 @@ func (p *GCPProvider) exchangeTokenWithSTS(ctx context.Context, k8sToken, audien
 	data.Set("audience", audience)
 	data.Set("scope", "https://www.googleapis.com/auth/cloud-platform")
 
-	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -258,7 +259,7 @@ func (p *GCPProvider) impersonateServiceAccount(ctx context.Context, federatedTo
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", impersonateURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, impersonateURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}

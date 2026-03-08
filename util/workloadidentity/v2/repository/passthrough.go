@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
@@ -28,7 +29,7 @@ func (a *PassthroughAuthenticator) Authenticate(ctx context.Context, token *Toke
 	}
 
 	if token.Token == "" {
-		return nil, fmt.Errorf("empty bearer token")
+		return nil, errors.New("empty bearer token")
 	}
 
 	// Username priority: config overrides token's recommended username
@@ -38,7 +39,7 @@ func (a *PassthroughAuthenticator) Authenticate(ctx context.Context, token *Toke
 	}
 
 	if username == "" {
-		return nil, fmt.Errorf("passthrough authenticator requires a username (set in config or from identity provider)")
+		return nil, errors.New("passthrough authenticator requires a username (set in config or from identity provider)")
 	}
 
 	log.WithField("username", username).Info("Passthrough: using bearer token as password")
