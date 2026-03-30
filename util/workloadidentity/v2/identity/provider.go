@@ -10,7 +10,7 @@ import (
 type Config struct {
 	// Audience overrides the provider's default audience for token requests
 	// If empty, the provider uses its own default (e.g., "sts.amazonaws.com" for AWS,
-	// registry host for SPIFFE, "kubernetes.default.svc" for K8s)
+	// "kubernetes.default.svc" for K8s)
 	Audience string
 
 	// TokenURL is a custom token endpoint (overrides provider default)

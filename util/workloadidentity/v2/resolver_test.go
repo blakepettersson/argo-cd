@@ -79,12 +79,6 @@ func TestNewIdentityProvider(t *testing.T) {
 		wantError bool
 	}{
 		{
-			name:     "spiffe provider - no SA needed",
-			repo:     &v1alpha1.Repository{Repo: "oci://registry.example.com/repo", WorkloadIdentityProvider: "spiffe"},
-			wantNil:  false,
-			createSA: false,
-		},
-		{
 			name:      "k8s provider - SA exists",
 			repo:      &v1alpha1.Repository{Repo: "", WorkloadIdentityProvider: "k8s", Project: "default"},
 			saName:    "argocd-project-default",

@@ -44,10 +44,6 @@ func NewIdentityProvider(ctx context.Context, repository *v1alpha1.Repository, c
 		return nil, fmt.Errorf("failed to get service account %s: %w", saName, err)
 	}
 
-	if repository.WorkloadIdentityProvider == "spiffe" {
-		return identity.NewSPIFFEProvider(repository.Repo, sa), nil
-	}
-
 	k8sProvider := identity.NewK8sProvider(clientset, ns, sa)
 	switch repository.WorkloadIdentityProvider {
 	case "k8s":

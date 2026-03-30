@@ -126,7 +126,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.62
 	github.com/aws/aws-sdk-go-v2/service/ecr v1.55.1
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.17
-	github.com/spiffe/go-spiffe/v2 v2.6.0
 )
 
 require (

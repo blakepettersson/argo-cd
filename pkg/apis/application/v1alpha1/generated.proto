@@ -1953,7 +1953,7 @@ message Repository {
   // Depth specifies the depth for shallow clones. A value of 0 or omitting the field indicates a full clone.
   optional int64 depth = 27;
 
-  // WorkloadIdentityProvider specifies the provider for workload identity ("aws", "gcp", "azure", "spiffe", "k8s").
+  // WorkloadIdentityProvider specifies the provider for workload identity ("aws", "gcp", "azure", "k8s").
   // When set, the app-controller resolves credentials from the project-specific service account
   // (argocd-project-<projectName>) before passing the repository to the repo-server.
   optional string workloadIdentityProvider = 28;

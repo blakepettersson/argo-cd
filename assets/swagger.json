@@ -9684,7 +9684,7 @@
           "title": "WorkloadIdentityPathTemplate specifies the URL path template for http authenticator\nUses Go template syntax with Sprig functions. Variables: {{ .token }}, {{ .registry }}, {{ .repo }}, plus custom params"
         },
         "workloadIdentityProvider": {
-          "description": "WorkloadIdentityProvider specifies the provider for workload identity (\"aws\", \"gcp\", \"azure\", \"spiffe\", \"k8s\").\nWhen set, the app-controller resolves credentials from the project-specific service account\n(argocd-project-<projectName>) before passing the repository to the repo-server.",
+          "description": "WorkloadIdentityProvider specifies the provider for workload identity (\"aws\", \"gcp\", \"azure\", \"k8s\").\nWhen set, the app-controller resolves credentials from the project-specific service account\n(argocd-project-<projectName>) before passing the repository to the repo-server.",
           "type": "string"
         },
         "workloadIdentityResponseTokenField": {

@@ -118,7 +118,7 @@ type Repository struct {
 	InsecureOCIForceHttp bool `json:"insecureOCIForceHttp,omitempty" protobuf:"bytes,26,opt,name=insecureOCIForceHttp"` //nolint:revive //FIXME(var-naming)
 	// Depth specifies the depth for shallow clones. A value of 0 or omitting the field indicates a full clone.
 	Depth int64 `json:"depth,omitempty" protobuf:"bytes,27,opt,name=depth"`
-	// WorkloadIdentityProvider specifies the provider for workload identity ("aws", "gcp", "azure", "spiffe", "k8s").
+	// WorkloadIdentityProvider specifies the provider for workload identity ("aws", "gcp", "azure", "k8s").
 	// When set, the app-controller resolves credentials from the project-specific service account
 	// (argocd-project-<projectName>) before passing the repository to the repo-server.
 	WorkloadIdentityProvider string `json:"workloadIdentityProvider,omitempty" protobuf:"bytes,28,opt,name=workloadIdentityProvider"`
