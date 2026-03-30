@@ -107,22 +107,29 @@ package identity
 // The AWS region is automatically extracted from the ECR repository URL.
 // Example: 123456789012.dkr.ecr.us-west-2.amazonaws.com → us-west-2
 //
-// ## Note on EKS Pod Identity
+// ## Authentication Methods
 //
-// This implementation uses IRSA (IAM Roles for Service Accounts) rather than the newer
-// EKS Pod Identity feature. While EKS Pod Identity is simpler to set up for single-identity
-// workloads, IRSA is required for ArgoCD's multi-tenant workload identity model because:
+// This implementation supports two authentication methods, tried in order:
 //
-//   - ArgoCD needs to assume different IAM roles per project from a single repo-server pod
-//   - IRSA allows exchanging any service account token via STS AssumeRoleWithWebIdentity
-//   - EKS Pod Identity injects credentials at pod startup for only the pod's own service account
+// 1. **EKS Pod Identity** (preferred): If the Pod Identity Agent is available
+//    (detected via AWS_CONTAINER_CREDENTIALS_FULL_URI env var), requests a K8s token
+//    with audience "pods.eks.amazonaws.com" and exchanges it via the agent's HTTP endpoint.
+//    Setup: `aws eks create-pod-identity-association` per service account — no OIDC provider needed.
 //
-// IRSA and EKS Pod Identity coexist on the same cluster - you can use Pod Identity for other
-// workloads while using IRSA for ArgoCD's workload identity feature.
+// 2. **IRSA** (fallback): Exchanges a K8s token via STS AssumeRoleWithWebIdentity.
+//    Requires OIDC provider + IAM trust policy per service account (setup documented above).
+//
+// Both methods support ArgoCD's multi-tenant model where a single repo-server pod
+// assumes different IAM roles per project by requesting tokens for per-project service accounts
+// via the TokenRequest API.
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -138,8 +145,14 @@ const (
 	// AnnotationAWSRoleARN is the EKS annotation for IAM role
 	AnnotationAWSRoleARN = "eks.amazonaws.com/role-arn"
 
-	// DefaultAWSAudience is the default STS audience
+	// DefaultAWSAudience is the default STS audience for IRSA
 	DefaultAWSAudience = "sts.amazonaws.com"
+
+	// PodIdentityAudience is the audience for EKS Pod Identity tokens
+	PodIdentityAudience = "pods.eks.amazonaws.com"
+
+	// EnvPodIdentityAgentURI is set by the Pod Identity webhook when the agent is available
+	EnvPodIdentityAgentURI = "AWS_CONTAINER_CREDENTIALS_FULL_URI"
 )
 
 // AWSProvider exchanges K8s JWTs for AWS credentials via STS
@@ -160,48 +173,133 @@ func NewAWSProvider(repo *v1alpha1.Repository, k8s *K8sProvider) *AWSProvider {
 	}
 }
 
-// GetToken exchanges a K8s JWT for AWS credentials
+// GetToken exchanges a K8s JWT for AWS credentials.
+// It tries EKS Pod Identity first (if the agent is available), then falls back to IRSA.
 func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL string) (*repository.Token, error) {
-	// Get role ARN from standard EKS annotation on service account
+	saName := p.k8s.sa.Name
+	// ECR region is derived from the repository URL — this is the region the ECR
+	// authenticator needs for GetAuthorizationToken, independent of where STS runs.
+	ecrRegion := extractAWSRegion(p.repo.Repo)
+
+	// Try EKS Pod Identity first
+	if agentURI := os.Getenv(EnvPodIdentityAgentURI); agentURI != "" {
+		token, err := p.getTokenViaPodIdentity(ctx, agentURI, ecrRegion)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"serviceAccount": saName,
+				"error":          err.Error(),
+			}).Warn("AWS Pod Identity: failed, falling back to IRSA")
+		} else {
+			return token, nil
+		}
+	}
+
+	return p.getTokenViaIRSA(ctx, audience, tokenURL, ecrRegion)
+}
+
+// getTokenViaPodIdentity exchanges a K8s token via the EKS Pod Identity Agent HTTP endpoint.
+func (p *AWSProvider) getTokenViaPodIdentity(ctx context.Context, agentURI string, region string) (*repository.Token, error) {
+	saName := p.k8s.sa.Name
+
+	// Request K8s token with Pod Identity audience
+	k8sToken, err := p.k8s.GetToken(ctx, PodIdentityAudience, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to request K8s token: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"serviceAccount": saName,
+		"agentURI":       agentURI,
+	}).Info("AWS Pod Identity: exchanging token via agent")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentURI, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", k8sToken.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("pod identity agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agent response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("pod identity agent returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	// The agent returns the standard container credentials JSON format
+	var creds podIdentityCredentials
+	if err := json.Unmarshal(body, &creds); err != nil {
+		return nil, fmt.Errorf("failed to parse agent response: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"serviceAccount": saName,
+		"expiration":     creds.Expiration,
+	}).Info("AWS Pod Identity: successfully obtained credentials")
+
+	return &repository.Token{
+		Type: repository.TokenTypeAWS,
+		AWSCredentials: &repository.AWSCredentials{
+			AccessKeyID:     creds.AccessKeyID,
+			SecretAccessKey: creds.SecretAccessKey,
+			SessionToken:    creds.Token,
+			Region:          region,
+		},
+	}, nil
+}
+
+// podIdentityCredentials is the JSON response from the Pod Identity Agent endpoint.
+type podIdentityCredentials struct {
+	AccessKeyID     string `json:"AccessKeyId"`
+	SecretAccessKey string `json:"SecretAccessKey"`
+	Token           string `json:"Token"`
+	Expiration      string `json:"Expiration"`
+}
+
+// getTokenViaIRSA exchanges a K8s token for AWS credentials via STS AssumeRoleWithWebIdentity.
+// The SDK resolves its own region for STS (from AWS_REGION/AWS_DEFAULT_REGION injected by the
+// EKS webhook). ecrRegion is only used in the returned credentials for ECR GetAuthorizationToken.
+func (p *AWSProvider) getTokenViaIRSA(ctx context.Context, audience string, tokenURL string, ecrRegion string) (*repository.Token, error) {
 	saName := p.k8s.sa.Name
 	roleARN := p.k8s.sa.Annotations[AnnotationAWSRoleARN]
 	if roleARN == "" {
 		return nil, fmt.Errorf("service account %s missing %s annotation", saName, AnnotationAWSRoleARN)
 	}
 
-	// Use configured audience or default to STS
 	if audience == "" {
 		audience = DefaultAWSAudience
 	}
 
-	// Request K8s token with STS audience
 	k8sToken, err := p.k8s.GetToken(ctx, audience, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to request K8s token: %w", err)
 	}
 
-	// Extract AWS region from ECR repository URL
-	region := extractAWSRegion(p.repo.Repo)
+	// Let the SDK resolve region from env (AWS_REGION/AWS_DEFAULT_REGION injected by EKS webhook)
+	awsCfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
 
 	log.WithFields(log.Fields{
 		"serviceAccount": saName,
 		"roleARN":        roleARN,
-		"region":         region,
+		"stsRegion":      awsCfg.Region,
+		"ecrRegion":      ecrRegion,
 	}).Info("AWS IRSA: assuming IAM role with web identity")
 
-	// Check for optional STS endpoint override (for GovCloud, China, etc.) from repository config
 	stsEndpoint := tokenURL
 	if stsEndpoint != "" {
 		log.WithField("stsEndpoint", stsEndpoint).Debug("AWS IRSA: using custom STS endpoint")
 	}
 
-	// Load AWS config with region
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	// Create STS client with optional endpoint override
 	var stsOpts []func(*sts.Options)
 	if stsEndpoint != "" {
 		stsOpts = append(stsOpts, func(o *sts.Options) {
@@ -210,7 +308,6 @@ func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL st
 	}
 	stsClient := sts.NewFromConfig(awsCfg, stsOpts...)
 
-	// Assume role with web identity using the K8s JWT
 	roleSessionName := "argocd-" + saName
 	durationSeconds := int32(3600)
 	log.WithFields(log.Fields{
@@ -243,7 +340,7 @@ func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL st
 			SecretAccessKey: *assumeResult.Credentials.SecretAccessKey,
 			SessionToken:    *assumeResult.Credentials.SessionToken,
 			Expiration:      assumeResult.Credentials.Expiration,
-			Region:          awsCfg.Region,
+			Region:          ecrRegion,
 		},
 	}, nil
 }
