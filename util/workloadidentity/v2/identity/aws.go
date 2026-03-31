@@ -111,21 +111,22 @@ package identity
 //
 // This implementation supports two authentication methods, tried in order:
 //
-// 1. **EKS Pod Identity** (preferred): If the Pod Identity Agent is available
-//    (detected via AWS_CONTAINER_CREDENTIALS_FULL_URI env var), requests a K8s token
-//    with audience "pods.eks.amazonaws.com" and exchanges it via the agent's HTTP endpoint.
+// 1. **EKS Pod Identity** (preferred): Uses the EKS Auth API (AssumeRoleForPodIdentity)
+//    to exchange a K8s token for AWS credentials. The cluster name is resolved from
+//    ARGOCD_AWS_EKS_CLUSTER env var, or auto-detected via EC2 instance metadata (IMDS)
+//    by parsing the EKS bootstrap script from user-data.
 //    Setup: `aws eks create-pod-identity-association` per service account — no OIDC provider needed.
 //
 // 2. **IRSA** (fallback): Exchanges a K8s token via STS AssumeRoleWithWebIdentity.
 //    Requires OIDC provider + IAM trust policy per service account (setup documented above).
 //
-// Both methods support ArgoCD's multi-tenant model where a single repo-server pod
+// Both methods support ArgoCD's multi-tenant model where a single server pod
 // assumes different IAM roles per project by requesting tokens for per-project service accounts
 // via the TokenRequest API.
 
 import (
+	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -134,6 +135,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/eksauth"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	log "github.com/sirupsen/logrus"
 
@@ -151,8 +153,17 @@ const (
 	// PodIdentityAudience is the audience for EKS Pod Identity tokens
 	PodIdentityAudience = "pods.eks.amazonaws.com"
 
+	// EnvEKSCluster is the env var to explicitly set the EKS cluster name for Pod Identity
+	EnvEKSCluster = "ARGOCD_AWS_EKS_CLUSTER"
+
 	// EnvPodIdentityAgentURI is set by the Pod Identity webhook when the agent is available
 	EnvPodIdentityAgentURI = "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+
+	// imdsTokenEndpoint is the IMDSv2 token endpoint
+	imdsTokenEndpoint = "http://169.254.169.254/latest/api/token"
+
+	// imdsUserDataEndpoint is the IMDS user-data endpoint
+	imdsUserDataEndpoint = "http://169.254.169.254/latest/user-data"
 )
 
 // AWSProvider exchanges K8s JWTs for AWS credentials via STS
@@ -174,19 +185,20 @@ func NewAWSProvider(repo *v1alpha1.Repository, k8s *K8sProvider) *AWSProvider {
 }
 
 // GetToken exchanges a K8s JWT for AWS credentials.
-// It tries EKS Pod Identity first (if the agent is available), then falls back to IRSA.
+// It tries EKS Pod Identity (via AssumeRoleForPodIdentity API) first, then falls back to IRSA.
 func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL string) (*repository.Token, error) {
 	saName := p.k8s.sa.Name
 	// ECR region is derived from the repository URL — this is the region the ECR
 	// authenticator needs for GetAuthorizationToken, independent of where STS runs.
 	ecrRegion := extractAWSRegion(p.repo.Repo)
 
-	// Try EKS Pod Identity first
-	if agentURI := os.Getenv(EnvPodIdentityAgentURI); agentURI != "" {
-		token, err := p.getTokenViaPodIdentity(ctx, agentURI, ecrRegion)
+	// Try EKS Pod Identity via AssumeRoleForPodIdentity API
+	if clusterName := p.resolveEKSClusterName(ctx); clusterName != "" {
+		token, err := p.getTokenViaPodIdentity(ctx, clusterName, ecrRegion)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"serviceAccount": saName,
+				"clusterName":    clusterName,
 				"error":          err.Error(),
 			}).Warn("AWS Pod Identity: failed, falling back to IRSA")
 		} else {
@@ -197,8 +209,91 @@ func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL st
 	return p.getTokenViaIRSA(ctx, audience, tokenURL, ecrRegion)
 }
 
-// getTokenViaPodIdentity exchanges a K8s token via the EKS Pod Identity Agent HTTP endpoint.
-func (p *AWSProvider) getTokenViaPodIdentity(ctx context.Context, agentURI string, region string) (*repository.Token, error) {
+// resolveEKSClusterName returns the EKS cluster name from env var or IMDS user-data.
+// Returns empty string if the cluster name cannot be determined.
+func (p *AWSProvider) resolveEKSClusterName(ctx context.Context) string {
+	// 1. Explicit env var
+	if name := os.Getenv(EnvEKSCluster); name != "" {
+		log.WithField("clusterName", name).Debug("AWS Pod Identity: cluster name from env var")
+		return name
+	}
+
+	// 2. Auto-detect from EC2 instance metadata (IMDS) user-data
+	name, err := getClusterNameFromIMDS(ctx)
+	if err != nil {
+		log.WithField("error", err.Error()).Debug("AWS Pod Identity: could not detect cluster name from IMDS")
+		return ""
+	}
+
+	log.WithField("clusterName", name).Debug("AWS Pod Identity: cluster name from IMDS user-data")
+	return name
+}
+
+// getClusterNameFromIMDS retrieves the EKS cluster name from EC2 instance metadata.
+// EKS nodes run /etc/eks/bootstrap.sh <cluster-name> in user-data.
+func getClusterNameFromIMDS(ctx context.Context) (string, error) {
+	// Get IMDSv2 token
+	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPut, imdsTokenEndpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create IMDS token request: %w", err)
+	}
+	tokenReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "60")
+
+	tokenResp, err := http.DefaultClient.Do(tokenReq)
+	if err != nil {
+		return "", fmt.Errorf("IMDS token request failed: %w", err)
+	}
+	defer tokenResp.Body.Close()
+
+	tokenBody, err := io.ReadAll(tokenResp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read IMDS token: %w", err)
+	}
+	if tokenResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("IMDS token request returned %d", tokenResp.StatusCode)
+	}
+	imdsToken := string(tokenBody)
+
+	// Get user-data
+	udReq, err := http.NewRequestWithContext(ctx, http.MethodGet, imdsUserDataEndpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create IMDS user-data request: %w", err)
+	}
+	udReq.Header.Set("X-aws-ec2-metadata-token", imdsToken)
+
+	udResp, err := http.DefaultClient.Do(udReq)
+	if err != nil {
+		return "", fmt.Errorf("IMDS user-data request failed: %w", err)
+	}
+	defer udResp.Body.Close()
+
+	if udResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("IMDS user-data returned %d", udResp.StatusCode)
+	}
+
+	// Parse user-data line by line looking for /etc/eks/bootstrap.sh <cluster-name>
+	scanner := bufio.NewScanner(udResp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if idx := strings.Index(line, "/etc/eks/bootstrap.sh"); idx != -1 {
+			// Extract the first argument after the script path
+			after := strings.TrimSpace(line[idx+len("/etc/eks/bootstrap.sh"):])
+			fields := strings.Fields(after)
+			if len(fields) > 0 {
+				// Strip quotes if present
+				name := strings.Trim(fields[0], "'\"")
+				if name != "" {
+					return name, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("bootstrap.sh not found in user-data")
+}
+
+// getTokenViaPodIdentity exchanges a K8s token via the EKS AssumeRoleForPodIdentity API.
+func (p *AWSProvider) getTokenViaPodIdentity(ctx context.Context, clusterName string, region string) (*repository.Token, error) {
 	saName := p.k8s.sa.Name
 
 	// Request K8s token with Pod Identity audience
@@ -207,60 +302,40 @@ func (p *AWSProvider) getTokenViaPodIdentity(ctx context.Context, agentURI strin
 		return nil, fmt.Errorf("failed to request K8s token: %w", err)
 	}
 
-	log.WithFields(log.Fields{
-		"serviceAccount": saName,
-		"agentURI":       agentURI,
-	}).Info("AWS Pod Identity: exchanging token via agent")
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentURI, nil)
+	awsCfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Authorization", k8sToken.Token)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("pod identity agent request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read agent response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("pod identity agent returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	// The agent returns the standard container credentials JSON format
-	var creds podIdentityCredentials
-	if err := json.Unmarshal(body, &creds); err != nil {
-		return nil, fmt.Errorf("failed to parse agent response: %w", err)
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
 	log.WithFields(log.Fields{
 		"serviceAccount": saName,
-		"expiration":     creds.Expiration,
+		"clusterName":    clusterName,
+	}).Info("AWS Pod Identity: calling AssumeRoleForPodIdentity")
+
+	client := eksauth.NewFromConfig(awsCfg)
+	result, err := client.AssumeRoleForPodIdentity(ctx, &eksauth.AssumeRoleForPodIdentityInput{
+		ClusterName: aws.String(clusterName),
+		Token:       aws.String(k8sToken.Token),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("AssumeRoleForPodIdentity failed: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"serviceAccount": saName,
+		"expiration":     result.Credentials.Expiration,
 	}).Info("AWS Pod Identity: successfully obtained credentials")
 
 	return &repository.Token{
 		Type: repository.TokenTypeAWS,
 		AWSCredentials: &repository.AWSCredentials{
-			AccessKeyID:     creds.AccessKeyID,
-			SecretAccessKey: creds.SecretAccessKey,
-			SessionToken:    creds.Token,
+			AccessKeyID:     *result.Credentials.AccessKeyId,
+			SecretAccessKey: *result.Credentials.SecretAccessKey,
+			SessionToken:    *result.Credentials.SessionToken,
+			Expiration:      result.Credentials.Expiration,
 			Region:          region,
 		},
 	}, nil
-}
-
-// podIdentityCredentials is the JSON response from the Pod Identity Agent endpoint.
-type podIdentityCredentials struct {
-	AccessKeyID     string `json:"AccessKeyId"`
-	SecretAccessKey string `json:"SecretAccessKey"`
-	Token           string `json:"Token"`
-	Expiration      string `json:"Expiration"`
 }
 
 // getTokenViaIRSA exchanges a K8s token for AWS credentials via STS AssumeRoleWithWebIdentity.
