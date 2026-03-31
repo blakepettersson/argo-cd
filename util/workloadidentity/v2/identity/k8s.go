@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"fmt"
+	"os"
 
 	log "github.com/sirupsen/logrus"
 	authv1 "k8s.io/api/authentication/v1"
@@ -21,6 +22,7 @@ import (
 type K8sProvider struct {
 	sa              *corev1.ServiceAccount
 	serviceAccounts v1.ServiceAccountInterface
+	pods            v1.PodInterface
 }
 
 func (p *K8sProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
@@ -29,14 +31,17 @@ func (p *K8sProvider) DefaultRepositoryAuthenticator() repository.Authenticator 
 
 // NewK8sProvider creates a new K8s passthrough provider
 func NewK8sProvider(clientset kubernetes.Interface, namespace string, sa *corev1.ServiceAccount) *K8sProvider {
-	serviceAccounts := clientset.CoreV1().ServiceAccounts(namespace)
+	coreV1 := clientset.CoreV1()
 	return &K8sProvider{
-		serviceAccounts: serviceAccounts,
+		serviceAccounts: coreV1.ServiceAccounts(namespace),
+		pods:            coreV1.Pods(namespace),
 		sa:              sa,
 	}
 }
 
-// GetToken requests a K8s token with the configured audience and returns it directly
+// GetToken requests a K8s token with the configured audience and returns it directly.
+// When running inside a pod, the token is bound to the current pod so that
+// pod-identity-aware validators (e.g. EKS Pod Identity) can verify the caller.
 func (p *K8sProvider) GetToken(ctx context.Context, audience, _ string) (*repository.Token, error) {
 	saName := p.sa.Name
 	if audience == "" {
@@ -58,6 +63,15 @@ func (p *K8sProvider) GetToken(ctx context.Context, audience, _ string) (*reposi
 		},
 	}
 
+	// Bind the token to the current pod if we can determine it.
+	// This is required for EKS Pod Identity and similar systems that
+	// validate the token is bound to the requesting pod.
+	if boundRef, err := p.boundPodRef(ctx); err != nil {
+		log.WithError(err).Warn("K8s provider: could not resolve current pod for bound token, requesting unbound token")
+	} else if boundRef != nil {
+		tokenRequest.Spec.BoundObjectRef = boundRef
+	}
+
 	resp, err := p.serviceAccounts.CreateToken(
 		ctx,
 		saName,
@@ -71,6 +85,27 @@ func (p *K8sProvider) GetToken(ctx context.Context, audience, _ string) (*reposi
 	return &repository.Token{
 		Type:  repository.TokenTypeBearer,
 		Token: resp.Status.Token,
+	}, nil
+}
+
+// boundPodRef returns a BoundObjectReference for the pod we're running in,
+// or (nil, nil) if we can't determine the pod name from the environment.
+func (p *K8sProvider) boundPodRef(ctx context.Context) (*authv1.BoundObjectReference, error) {
+	podName := os.Getenv("HOSTNAME")
+	if podName == "" {
+		return nil, nil
+	}
+
+	pod, err := p.pods.Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pod %s: %w", podName, err)
+	}
+
+	return &authv1.BoundObjectReference{
+		Kind:       "Pod",
+		APIVersion: "v1",
+		Name:       pod.Name,
+		UID:        pod.UID,
 	}, nil
 }
 
