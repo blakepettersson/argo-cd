@@ -1,9 +1,131 @@
 package identity
 
-// # AWS IRSA (IAM Roles for Service Accounts) Setup
+// This file implements two AWS authentication paths for ECR access:
+// EKS Pod Identity (preferred, documented first) and IRSA (fallback, documented below).
 //
-// This file implements AWS IRSA for authenticating to AWS Elastic Container Registry (ECR)
-// using Kubernetes service account tokens.
+// # AWS EKS Pod Identity Setup (preferred path)
+//
+// One controller SA, one IAM role, one Pod Identity Association. Per-project scoping
+// is done via the `argocd-project` session tag injected on a chained AssumeRole call,
+// referenced from resource policies via `aws:PrincipalTag/argocd-project`.
+//
+// ## Required AWS/EKS Setup
+//
+// 1. Install the EKS Pod Identity agent addon on the cluster:
+//
+//	aws eks create-addon --cluster-name "$CLUSTER_NAME" --addon-name eks-pod-identity-agent
+//
+// 2. Create an IAM policy for ECR access (per-project scoping via PrincipalTag goes
+//    on the resource policies, NOT here — this policy just grants the actions):
+//
+//	cat <<EOF > argocd-ecr-policy.json
+//	{
+//	    "Version": "2012-10-17",
+//	    "Statement": [
+//	        {
+//	            "Effect": "Allow",
+//	            "Action": [
+//	                "ecr:GetAuthorizationToken",
+//	                "ecr:BatchCheckLayerAvailability",
+//	                "ecr:GetDownloadUrlForLayer",
+//	                "ecr:BatchGetImage"
+//	            ],
+//	            "Resource": "*"
+//	        }
+//	    ]
+//	}
+//	EOF
+//	aws iam create-policy --policy-name ArgoCD-ECR-ReadOnly \
+//	    --policy-document file://argocd-ecr-policy.json
+//
+// 3. Create the controller IAM role with a trust policy that allows BOTH the Pod
+//    Identity service principal AND self-assume + TagSession (required for the
+//    chained AssumeRole that injects the argocd-project session tag):
+//
+//	export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+//	export ROLE_NAME="argocd-controller"
+//
+//	cat <<EOF > trust-policy.json
+//	{
+//	    "Version": "2012-10-17",
+//	    "Statement": [
+//	        {
+//	            "Sid": "AllowPodIdentityToAssume",
+//	            "Effect": "Allow",
+//	            "Principal": { "Service": "pods.eks.amazonaws.com" },
+//	            "Action": ["sts:AssumeRole", "sts:TagSession"]
+//	        },
+//	        {
+//	            "Sid": "AllowSelfAssumeForProjectTagInjection",
+//	            "Effect": "Allow",
+//	            "Principal": {
+//	                "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_NAME}"
+//	            },
+//	            "Action": ["sts:AssumeRole", "sts:TagSession"]
+//	        }
+//	    ]
+//	}
+//	EOF
+//
+//	aws iam create-role --role-name "$ROLE_NAME" \
+//	    --assume-role-policy-document file://trust-policy.json
+//	aws iam attach-role-policy --role-name "$ROLE_NAME" \
+//	    --policy-arn "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/ArgoCD-ECR-ReadOnly"
+//
+//    Both `sts:TagSession` lines are non-negotiable — without them, the corresponding
+//    step fails with AccessDenied on the tags specifically (reads like a generic auth
+//    error, easy to misdiagnose). If self-referencing the role ARN feels awkward, the
+//    second statement's Principal can be `"AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:root"`
+//    — same effect, leans on the identity policy for scoping.
+//
+// 4. Bind the controller ServiceAccount to the role via a Pod Identity Association:
+//
+//	aws eks create-pod-identity-association \
+//	    --cluster-name "$CLUSTER_NAME" \
+//	    --namespace argocd \
+//	    --service-account argocd-application-controller \
+//	    --role-arn "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_NAME}"
+//
+// 5. Reference the `aws:PrincipalTag/argocd-project` session tag in the resource
+//    policies you actually want scoped per project (ECR repo policy, S3 bucket policy,
+//    KMS key policy, etc.). Example ECR repository policy:
+//
+//	{
+//	    "Version": "2012-10-17",
+//	    "Statement": [
+//	        {
+//	            "Effect": "Allow",
+//	            "Principal": { "AWS": "arn:aws:iam::ACCOUNT:role/argocd-controller" },
+//	            "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+//	            "Condition": {
+//	                "StringEquals": { "aws:PrincipalTag/argocd-project": "team-platform" }
+//	            }
+//	        }
+//	    ]
+//	}
+//
+// ## What's NOT needed (vs IRSA)
+//
+//   - No OIDC provider on the cluster
+//   - No `sts:AssumeRoleWithWebIdentity` permission anywhere
+//   - No `eks.amazonaws.com/role-arn` annotation on the SA
+//   - No per-project service accounts (one controller SA covers all projects)
+//   - No `sts:GetCallerIdentity` permission in the identity policy (implicit for all callers)
+//
+// ## Authentication Flow (Pod Identity)
+//
+// 1. Pod Identity webhook injects AWS_CONTAINER_CREDENTIALS_FULL_URI + token file path
+// 2. SDK's default credential chain resolves Pod Identity creds via the container creds provider
+// 3. If the repository has a project: STS GetCallerIdentity → derive role ARN → AssumeRole
+//    with `argocd-project=<project>` as a session tag
+// 4. If the repository has no project: return base Pod Identity creds untagged
+// 5. Use the resulting credentials to call ECR GetAuthorizationToken
+//
+// ────────────────────────────────────────────────────────────────────────────────
+//
+// # AWS IRSA (IAM Roles for Service Accounts) Setup (fallback path)
+//
+// This is the legacy path, used when AWS_CONTAINER_CREDENTIALS_FULL_URI is not set.
 //
 // ## Required AWS/EKS Setup
 //
@@ -102,30 +224,10 @@ package identity
 // 3. Use the temporary credentials to call ECR GetAuthorizationToken
 // 4. Return the ECR credentials for use with the registry
 //
-// ## Region Detection
+// ## Region Detection (applies to both paths)
 //
 // The AWS region is automatically extracted from the ECR repository URL.
 // Example: 123456789012.dkr.ecr.us-west-2.amazonaws.com → us-west-2
-//
-// ## Authentication Methods
-//
-// This implementation supports two authentication methods, tried in order:
-//
-// 1. **EKS Pod Identity** (preferred): Detected via the webhook-injected env var
-//    AWS_CONTAINER_CREDENTIALS_FULL_URI. We rely on the AWS SDK's default credential
-//    chain to resolve Pod Identity creds (no explicit AssumeRoleForPodIdentity call,
-//    no K8s token minting, no cluster-name detection needed). After obtaining base
-//    creds we discover the assumed-role principal via STS GetCallerIdentity and chain
-//    AssumeRole on the same role, injecting argocd-project as a session tag. Downstream
-//    IAM policies can then scope by aws:PrincipalTag/argocd-project.
-//    Setup: one Pod Identity Association for the controller SA + a role whose trust
-//    policy allows both sts:AssumeRole AND sts:TagSession from its own assumed-role
-//    principal (self-assume for tag injection). No OIDC provider required.
-//
-// 2. **IRSA** (fallback): Exchanges a K8s token via STS AssumeRoleWithWebIdentity.
-//    Uses ArgoCD's multi-tenant model: a single pod assumes different IAM roles per
-//    project by requesting tokens for per-project service accounts via the TokenRequest
-//    API. Requires OIDC provider + per-SA IAM trust policy (setup documented above).
 
 import (
 	"context"
