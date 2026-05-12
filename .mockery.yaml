@@ -53,11 +53,15 @@ packages:
     interfaces:
       Dependencies: {}
       RepoGetter: {}
+  github.com/argoproj/argo-cd/v3/pkg/apiclient/application:
+    interfaces:
+      ApplicationServiceClient: {}
   github.com/argoproj/argo-cd/v3/pkg/apiclient/cluster:
     config:
       template-data:
         unroll-variadic: true
     interfaces:
+      ClusterServiceClient: {}
       ClusterServiceServer: {}
   github.com/argoproj/argo-cd/v3/pkg/apiclient/project:
     config:
@@ -85,10 +89,7 @@ packages:
     interfaces:
       RepoServerServiceClient: {}
       RepoServerService_GenerateManifestWithFilesClient: {}
-  github.com/argoproj/argo-cd/v3/server/application:
-    config:
-      template-data:
-        unroll-variadic: true
+  github.com/argoproj/argo-cd/v3/server/broadcast:
     interfaces:
       Broadcaster: {}
   github.com/argoproj/argo-cd/v3/server/extension:
@@ -152,16 +153,10 @@ packages:
       template-data: {}
     interfaces:
       ServiceAccountInterface: {}
-  github.com/argoproj/gitops-engine/pkg/cache:
-    config:
-      template-data:
-        unroll-variadic: true
+  github.com/argoproj/argo-cd/gitops-engine/pkg/cache:
     interfaces:
       ClusterCache: {}
-  github.com/argoproj/gitops-engine/pkg/diff:
-    config:
-      template-data:
-        unroll-variadic: true
+  github.com/argoproj/argo-cd/gitops-engine/pkg/diff:
     interfaces:
       ServerSideDryRunner: {}
   github.com/microsoft/azure-devops-go-api/azuredevops/v7/git:
