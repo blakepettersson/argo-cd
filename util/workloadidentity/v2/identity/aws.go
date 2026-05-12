@@ -111,32 +111,33 @@ package identity
 //
 // This implementation supports two authentication methods, tried in order:
 //
-// 1. **EKS Pod Identity** (preferred): Uses the EKS Auth API (AssumeRoleForPodIdentity)
-//    to exchange a K8s token for AWS credentials. The cluster name is resolved from
-//    ARGOCD_AWS_EKS_CLUSTER env var, or auto-detected via EC2 instance metadata (IMDS)
-//    by parsing the EKS bootstrap script from user-data.
-//    Setup: `aws eks create-pod-identity-association` per service account — no OIDC provider needed.
+// 1. **EKS Pod Identity** (preferred): Detected via the webhook-injected env var
+//    AWS_CONTAINER_CREDENTIALS_FULL_URI. We rely on the AWS SDK's default credential
+//    chain to resolve Pod Identity creds (no explicit AssumeRoleForPodIdentity call,
+//    no K8s token minting, no cluster-name detection needed). After obtaining base
+//    creds we discover the assumed-role principal via STS GetCallerIdentity and chain
+//    AssumeRole on the same role, injecting argocd-project as a session tag. Downstream
+//    IAM policies can then scope by aws:PrincipalTag/argocd-project.
+//    Setup: one Pod Identity Association for the controller SA + a role whose trust
+//    policy allows both sts:AssumeRole AND sts:TagSession from its own assumed-role
+//    principal (self-assume for tag injection). No OIDC provider required.
 //
 // 2. **IRSA** (fallback): Exchanges a K8s token via STS AssumeRoleWithWebIdentity.
-//    Requires OIDC provider + IAM trust policy per service account (setup documented above).
-//
-// Both methods support ArgoCD's multi-tenant model where a single server pod
-// assumes different IAM roles per project by requesting tokens for per-project service accounts
-// via the TokenRequest API.
+//    Uses ArgoCD's multi-tenant model: a single pod assumes different IAM roles per
+//    project by requesting tokens for per-project service accounts via the TokenRequest
+//    API. Requires OIDC provider + per-SA IAM trust policy (setup documented above).
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/eksauth"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
@@ -153,17 +154,18 @@ const (
 	// PodIdentityAudience is the audience for EKS Pod Identity tokens
 	PodIdentityAudience = "pods.eks.amazonaws.com"
 
-	// EnvEKSCluster is the env var to explicitly set the EKS cluster name for Pod Identity
-	EnvEKSCluster = "ARGOCD_AWS_EKS_CLUSTER"
-
-	// EnvPodIdentityAgentURI is set by the Pod Identity webhook when the agent is available
+	// EnvPodIdentityAgentURI is set by the Pod Identity webhook when the agent is available.
+	// Presence of this env var is our signal that the SDK's default credential chain will
+	// resolve to Pod Identity creds (via the container credentials provider).
 	EnvPodIdentityAgentURI = "AWS_CONTAINER_CREDENTIALS_FULL_URI"
 
-	// imdsTokenEndpoint is the IMDSv2 token endpoint
-	imdsTokenEndpoint = "http://169.254.169.254/latest/api/token"
+	// SessionTagProject is the AWS STS session tag key used to scope per-project access
+	// when chaining AssumeRole on top of EKS Pod Identity credentials. IAM policies on
+	// downstream resources can reference this via aws:PrincipalTag/argocd-project.
+	SessionTagProject = "argocd-project"
 
-	// imdsUserDataEndpoint is the IMDS user-data endpoint
-	imdsUserDataEndpoint = "http://169.254.169.254/latest/user-data"
+	// chainedSessionDuration is the AWS hard cap for chained STS AssumeRole sessions (1h).
+	chainedSessionDuration = int32(3600)
 )
 
 // AWSProvider exchanges K8s JWTs for AWS credentials via STS
@@ -185,20 +187,20 @@ func NewAWSProvider(repo *v1alpha1.Repository, k8s *K8sProvider) *AWSProvider {
 }
 
 // GetToken exchanges a K8s JWT for AWS credentials.
-// It tries EKS Pod Identity (via AssumeRoleForPodIdentity API) first, then falls back to IRSA.
+// If Pod Identity is available (webhook-injected env var present), the SDK's default
+// credential chain resolves to Pod Identity creds and we chain AssumeRole on top to
+// inject the argocd-project session tag. Otherwise we fall back to IRSA.
 func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL string) (*repository.Token, error) {
 	saName := p.k8s.sa.Name
 	// ECR region is derived from the repository URL — this is the region the ECR
 	// authenticator needs for GetAuthorizationToken, independent of where STS runs.
 	ecrRegion := extractAWSRegion(p.repo.Repo)
 
-	// Try EKS Pod Identity via AssumeRoleForPodIdentity API
-	if clusterName := p.resolveEKSClusterName(ctx); clusterName != "" {
-		token, err := p.getTokenViaPodIdentity(ctx, clusterName, ecrRegion)
+	if os.Getenv(EnvPodIdentityAgentURI) != "" {
+		token, err := p.getTokenViaPodIdentity(ctx, ecrRegion)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"serviceAccount": saName,
-				"clusterName":    clusterName,
 				"error":          err.Error(),
 			}).Warn("AWS Pod Identity: failed, falling back to IRSA")
 		} else {
@@ -209,133 +211,135 @@ func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL st
 	return p.getTokenViaIRSA(ctx, audience, tokenURL, ecrRegion)
 }
 
-// resolveEKSClusterName returns the EKS cluster name from env var or IMDS user-data.
-// Returns empty string if the cluster name cannot be determined.
-func (p *AWSProvider) resolveEKSClusterName(ctx context.Context) string {
-	// 1. Explicit env var
-	if name := os.Getenv(EnvEKSCluster); name != "" {
-		log.WithField("clusterName", name).Debug("AWS Pod Identity: cluster name from env var")
-		return name
-	}
-
-	// 2. Auto-detect from EC2 instance metadata (IMDS) user-data
-	name, err := getClusterNameFromIMDS(ctx)
-	if err != nil {
-		log.WithField("error", err.Error()).Debug("AWS Pod Identity: could not detect cluster name from IMDS")
-		return ""
-	}
-
-	log.WithField("clusterName", name).Debug("AWS Pod Identity: cluster name from IMDS user-data")
-	return name
-}
-
-// getClusterNameFromIMDS retrieves the EKS cluster name from EC2 instance metadata.
-// EKS nodes run /etc/eks/bootstrap.sh <cluster-name> in user-data.
-func getClusterNameFromIMDS(ctx context.Context) (string, error) {
-	// Get IMDSv2 token
-	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPut, imdsTokenEndpoint, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create IMDS token request: %w", err)
-	}
-	tokenReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "60")
-
-	tokenResp, err := http.DefaultClient.Do(tokenReq)
-	if err != nil {
-		return "", fmt.Errorf("IMDS token request failed: %w", err)
-	}
-	defer tokenResp.Body.Close()
-
-	tokenBody, err := io.ReadAll(tokenResp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read IMDS token: %w", err)
-	}
-	if tokenResp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("IMDS token request returned %d", tokenResp.StatusCode)
-	}
-	imdsToken := string(tokenBody)
-
-	// Get user-data
-	udReq, err := http.NewRequestWithContext(ctx, http.MethodGet, imdsUserDataEndpoint, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create IMDS user-data request: %w", err)
-	}
-	udReq.Header.Set("X-aws-ec2-metadata-token", imdsToken)
-
-	udResp, err := http.DefaultClient.Do(udReq)
-	if err != nil {
-		return "", fmt.Errorf("IMDS user-data request failed: %w", err)
-	}
-	defer udResp.Body.Close()
-
-	if udResp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("IMDS user-data returned %d", udResp.StatusCode)
-	}
-
-	// Parse user-data line by line looking for /etc/eks/bootstrap.sh <cluster-name>
-	scanner := bufio.NewScanner(udResp.Body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if idx := strings.Index(line, "/etc/eks/bootstrap.sh"); idx != -1 {
-			// Extract the first argument after the script path
-			after := strings.TrimSpace(line[idx+len("/etc/eks/bootstrap.sh"):])
-			fields := strings.Fields(after)
-			if len(fields) > 0 {
-				// Strip quotes if present
-				name := strings.Trim(fields[0], "'\"")
-				if name != "" {
-					return name, nil
-				}
-			}
-		}
-	}
-
-	return "", fmt.Errorf("bootstrap.sh not found in user-data")
-}
-
-// getTokenViaPodIdentity exchanges a K8s token via the EKS AssumeRoleForPodIdentity API.
-func (p *AWSProvider) getTokenViaPodIdentity(ctx context.Context, clusterName string, region string) (*repository.Token, error) {
-	saName := p.k8s.sa.Name
-
-	// Request K8s token with Pod Identity audience
-	k8sToken, err := p.k8s.GetToken(ctx, PodIdentityAudience, "")
-	if err != nil {
-		return nil, fmt.Errorf("failed to request K8s token: %w", err)
-	}
-
+// getTokenViaPodIdentity uses the SDK's default credential chain (which transparently
+// calls the Pod Identity agent via the webhook-injected env vars) to obtain base creds.
+// If the repository has a project set, AssumeRole is chained on the same role to inject
+// the argocd-project session tag; otherwise the credential is treated as global and the
+// base Pod Identity creds are returned directly. The chained path requires the role's
+// trust policy to allow both sts:AssumeRole AND sts:TagSession from its own assumed-role
+// principal (or the account root).
+func (p *AWSProvider) getTokenViaPodIdentity(ctx context.Context, region string) (*repository.Token, error) {
 	awsCfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	log.WithFields(log.Fields{
-		"serviceAccount": saName,
-		"clusterName":    clusterName,
-	}).Info("AWS Pod Identity: calling AssumeRoleForPodIdentity")
+	project := p.repo.Project
+	if project == "" {
+		log.Info("AWS Pod Identity: no project set; returning base Pod Identity credentials")
+		creds, err := awsCfg.Credentials.Retrieve(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve Pod Identity credentials: %w", err)
+		}
+		token := &repository.Token{
+			Type: repository.TokenTypeAWS,
+			AWSCredentials: &repository.AWSCredentials{
+				AccessKeyID:     creds.AccessKeyID,
+				SecretAccessKey: creds.SecretAccessKey,
+				SessionToken:    creds.SessionToken,
+				Region:          region,
+			},
+		}
+		if creds.CanExpire {
+			token.AWSCredentials.Expiration = &creds.Expires
+		}
+		return token, nil
+	}
 
-	client := eksauth.NewFromConfig(awsCfg)
-	result, err := client.AssumeRoleForPodIdentity(ctx, &eksauth.AssumeRoleForPodIdentityInput{
-		ClusterName: aws.String(clusterName),
-		Token:       aws.String(k8sToken.Token),
+	stsClient := sts.NewFromConfig(awsCfg)
+
+	// Discover the assumed-role principal so we can derive the underlying IAM role ARN
+	// for the chained AssumeRole call. The Pod Identity webhook doesn't expose the role
+	// ARN as an env var, so a single GetCallerIdentity round-trip is the price of dropping
+	// the explicit AssumeRoleForPodIdentity call.
+	caller, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to identify Pod Identity caller: %w", err)
+	}
+	roleARN, err := roleARNFromAssumedRoleARN(aws.ToString(caller.Arn))
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive role ARN from caller identity: %w", err)
+	}
+
+	roleSessionName := "argocd-proj-" + project
+	duration := chainedSessionDuration
+
+	log.WithFields(log.Fields{
+		"roleARN":         roleARN,
+		"project":         project,
+		"roleSessionName": roleSessionName,
+	}).Info("AWS Pod Identity: chaining AssumeRole with argocd-project session tag")
+
+	// Chained AssumeRole drops the original session's tags — EKS Pod Identity injects
+	// kubernetes-namespace, kubernetes-service-account, kubernetes-pod-{name,uid},
+	// eks-cluster-{name,arn} on the base session, and none of those survive this hop.
+	// They can be reconstructed if IAM policies need them:
+	//   - kubernetes-namespace / kubernetes-service-account: free from p.k8s.sa
+	//   - kubernetes-pod-name / kubernetes-pod-uid: needs downward API env vars
+	//   - eks-cluster-name / eks-cluster-arn: needs env var or IMDS detection
+	// Also consider TransitiveTagKeys for argocd-project if downstream consumers do
+	// their own AssumeRole and need the tag to persist across further chains.
+	out, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
+		RoleArn:         aws.String(roleARN),
+		RoleSessionName: aws.String(roleSessionName),
+		DurationSeconds: &duration,
+		Tags: []ststypes.Tag{
+			{Key: aws.String(SessionTagProject), Value: aws.String(project)},
+		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("AssumeRoleForPodIdentity failed: %w", err)
+		return nil, fmt.Errorf("AssumeRole with %s session tag failed for role %s: %w", SessionTagProject, roleARN, err)
 	}
 
 	log.WithFields(log.Fields{
-		"serviceAccount": saName,
-		"expiration":     result.Credentials.Expiration,
-	}).Info("AWS Pod Identity: successfully obtained credentials")
+		"roleARN":    roleARN,
+		"project":    project,
+		"expiration": out.Credentials.Expiration,
+	}).Info("AWS Pod Identity: obtained project-tagged credentials")
 
 	return &repository.Token{
 		Type: repository.TokenTypeAWS,
 		AWSCredentials: &repository.AWSCredentials{
-			AccessKeyID:     *result.Credentials.AccessKeyId,
-			SecretAccessKey: *result.Credentials.SecretAccessKey,
-			SessionToken:    *result.Credentials.SessionToken,
-			Expiration:      result.Credentials.Expiration,
+			AccessKeyID:     aws.ToString(out.Credentials.AccessKeyId),
+			SecretAccessKey: aws.ToString(out.Credentials.SecretAccessKey),
+			SessionToken:    aws.ToString(out.Credentials.SessionToken),
+			Expiration:      out.Credentials.Expiration,
 			Region:          region,
 		},
 	}, nil
+}
+
+// roleARNFromAssumedRoleARN converts an assumed-role ARN (returned by STS/EKS auth) into
+// the underlying IAM role ARN. Accepts either form for robustness:
+//
+//	arn:aws:sts::123456789012:assumed-role/MyRole/MySession -> arn:aws:iam::123456789012:role/MyRole
+//	arn:aws:iam::123456789012:role/MyRole                   -> unchanged
+func roleARNFromAssumedRoleARN(input string) (string, error) {
+	parsed, err := arn.Parse(input)
+	if err != nil {
+		return "", fmt.Errorf("invalid ARN %q: %w", input, err)
+	}
+	switch parsed.Service {
+	case "iam":
+		if strings.HasPrefix(parsed.Resource, "role/") {
+			return input, nil
+		}
+		return "", fmt.Errorf("expected role resource in IAM ARN, got %q", parsed.Resource)
+	case "sts":
+		// sts resource format: "assumed-role/ROLE_NAME/SESSION_NAME"
+		parts := strings.SplitN(parsed.Resource, "/", 3)
+		if len(parts) < 2 || parts[0] != "assumed-role" {
+			return "", fmt.Errorf("expected assumed-role resource in STS ARN, got %q", parsed.Resource)
+		}
+		return arn.ARN{
+			Partition: parsed.Partition,
+			Service:   "iam",
+			AccountID: parsed.AccountID,
+			Resource:  "role/" + parts[1],
+		}.String(), nil
+	default:
+		return "", fmt.Errorf("unexpected service %q in ARN: %s", parsed.Service, input)
+	}
 }
 
 // getTokenViaIRSA exchanges a K8s token for AWS credentials via STS AssumeRoleWithWebIdentity.
