@@ -950,7 +950,7 @@ func Test_newAuth_SSH_HostKeyAlgorithms(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	knownHostsPath := filepath.Join(tmpDir, "ssh_known_hosts")
-	knownHostsLine := fmt.Sprintf("example.com %s", strings.TrimSpace(string(authorizedKey)))
+	knownHostsLine := "example.com " + strings.TrimSpace(string(authorizedKey))
 	require.NoError(t, os.WriteFile(knownHostsPath, []byte(knownHostsLine+"\n"), 0o600))
 
 	t.Setenv("ARGOCD_SSH_DATA_PATH", tmpDir)
