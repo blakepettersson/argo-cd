@@ -398,7 +398,11 @@ func buildSSHAuth(repoURL string, creds *SSHCreds) (transport.AuthMethod, error)
 
 	cb, algos, err := resolveSSHHostKeyConfig(repoURL)
 	if err != nil {
-		log.Errorf("Could not set-up SSH known hosts callback for %s: %v", repoURL, err)
+		// Returning the error rather than continuing with a nil callback
+		// avoids handing back an AuthMethod with no host-key verification.
+		// For the no-credentials path, newAuth catches this and lets go-git
+		// fall back to its DefaultAuthBuilder.
+		return nil, fmt.Errorf("could not set up SSH known hosts callback for %s: %w", repoURL, err)
 	}
 
 	if creds == nil {
