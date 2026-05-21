@@ -113,7 +113,10 @@ func NewGCPProvider(repoURL string, k8s *K8sProvider) *GCPProvider {
 
 // GetToken exchanges a K8s JWT for GCP credentials
 func (p *GCPProvider) GetToken(ctx context.Context, audience string, tokenURL string) (*repository.Token, error) {
-	sa := p.k8s.sa
+	sa, err := p.k8s.LoadSA(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	log.Infof("resolveGCP: SA=%s/%s, annotations=%v, config.Audience=%q", sa.Namespace, sa.Name, sa.Annotations, audience)
 

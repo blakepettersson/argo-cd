@@ -137,8 +137,11 @@ type Repository struct {
 	// AzureActiveDirectoryEndpoint specifies the Azure Active Directory endpoint used for Service Principal authentication. If empty will default to https://login.microsoftonline.com
 	AzureActiveDirectoryEndpoint string `json:"azureActiveDirectoryEndpoint,omitempty" protobuf:"bytes,32,opt,name=azureActiveDirectoryEndpoint"`
 	// WorkloadIdentityProvider specifies the provider for workload identity ("aws", "gcp", "azure", "k8s").
-	// When set, the app-controller resolves credentials from the project-specific service account
-	// (argocd-project-<projectName>) before passing the repository to the repo-server.
+	// When set, the app-controller resolves credentials before passing the repository to the repo-server.
+	// For IRSA, GCP, Azure, and K8s, resolution reads the project-specific service account
+	// (argocd-project-<projectName>) for provider annotations. EKS Pod Identity uses the pod's own
+	// IAM identity and injects an argocd-project session tag on a self-assume, so no per-project
+	// service account is required.
 	WorkloadIdentityProvider string `json:"workloadIdentityProvider,omitempty" protobuf:"bytes,33,opt,name=workloadIdentityProvider"`
 	// WorkloadIdentityTokenURL optionally specifies a custom token endpoint URL (e.g., for GovCloud/sovereign clouds)
 	WorkloadIdentityTokenURL string `json:"workloadIdentityTokenURL,omitempty" protobuf:"bytes,34,opt,name=workloadIdentityTokenURL"`

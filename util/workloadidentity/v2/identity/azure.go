@@ -110,7 +110,10 @@ func NewAzureProvider(repo *v1alpha1.Repository, k8s *K8sProvider) *AzureProvide
 
 // GetToken exchanges a K8s JWT for Azure credentials
 func (p *AzureProvider) GetToken(ctx context.Context, audience string, tokenURL string) (*repository.Token, error) {
-	sa := p.k8s.sa
+	sa, err := p.k8s.LoadSA(ctx)
+	if err != nil {
+		return nil, err
+	}
 	// Get Azure client ID and tenant ID from standard Azure Workload Identity annotations on service account
 	clientID := sa.Annotations[AnnotationAzureClientID]
 	if clientID == "" {

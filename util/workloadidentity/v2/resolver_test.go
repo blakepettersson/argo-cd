@@ -67,7 +67,6 @@ func TestNewResolver(t *testing.T) {
 }
 
 func TestNewIdentityProvider(t *testing.T) {
-	ctx := context.Background()
 	namespace := "argocd"
 
 	tests := []struct {
@@ -111,12 +110,26 @@ func TestNewIdentityProvider(t *testing.T) {
 			wantError: false,
 		},
 		{
-			name:      "k8s provider - SA does not exist",
+			// Construction is lazy: NewIdentityProvider no longer fetches the SA up
+			// front, so a missing argocd-project-<project> SA is not an error here.
+			// The SA fetch happens inside provider.GetToken for paths that need it
+			// (IRSA, GCP, Azure, K8s); AWS Pod Identity skips it entirely.
+			name:      "k8s provider - SA does not exist (lazy fetch)",
 			repo:      &v1alpha1.Repository{Repo: "", WorkloadIdentityProvider: "k8s", Project: "nonexistent"},
 			saName:    "argocd-project-nonexistent",
 			createSA:  false,
 			wantNil:   false,
-			wantError: true,
+			wantError: false,
+		},
+		{
+			// Pod Identity does not use per-project SAs at all — construction must
+			// succeed even when no SA is present in the cluster.
+			name:      "aws provider - SA does not exist (Pod Identity friendly)",
+			repo:      &v1alpha1.Repository{Repo: "oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/repo", WorkloadIdentityProvider: "aws", Project: "default"},
+			saName:    "argocd-project-default",
+			createSA:  false,
+			wantNil:   false,
+			wantError: false,
 		},
 		{
 			name:      "unknown provider - returns nil",
@@ -151,7 +164,7 @@ func TestNewIdentityProvider(t *testing.T) {
 				clientset = fake.NewSimpleClientset()
 			}
 
-			provider, err := NewIdentityProvider(ctx, tt.repo, clientset, namespace)
+			provider, err := NewIdentityProvider(tt.repo, clientset, namespace)
 
 			if tt.wantError {
 				require.Error(t, err)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -35,16 +34,14 @@ func NewResolver(clientset kubernetes.Interface, namespace string) *Resolver {
 
 // NewIdentityProvider creates an identity provider based on the provider name.
 // This is a convenience function for callers who don't want to manage provider instantiation.
-func NewIdentityProvider(ctx context.Context, repository *v1alpha1.Repository, clientset kubernetes.Interface, ns string) (identity.Provider, error) {
+//
+// The project-scoped service account is resolved lazily by the returned provider — paths
+// that don't need an SA (notably AWS EKS Pod Identity, which uses the pod's own IAM
+// identity and injects a session tag from the repository's project field) do not require
+// `argocd-project-<project>` to exist in the cluster.
+func NewIdentityProvider(repository *v1alpha1.Repository, clientset kubernetes.Interface, ns string) (identity.Provider, error) {
 	saName := getServiceAccountName(repository.Project)
-
-	serviceAccounts := clientset.CoreV1().ServiceAccounts(ns)
-	sa, err := serviceAccounts.Get(ctx, saName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get service account %s: %w", saName, err)
-	}
-
-	k8sProvider := identity.NewK8sProvider(clientset, ns, sa)
+	k8sProvider := identity.NewK8sProvider(clientset, ns, saName)
 	switch repository.WorkloadIdentityProvider {
 	case "k8s":
 		return k8sProvider, nil

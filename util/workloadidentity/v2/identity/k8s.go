@@ -19,38 +19,67 @@ import (
 // Use this when the target service can validate K8s JWTs directly via OIDC federation.
 //
 // If no audience is configured, defaults to "kubernetes.default.svc".
+//
+// The underlying ServiceAccount object is resolved lazily via LoadSA, so providers
+// that don't need it (notably the AWS Pod Identity path, which uses the pod's own
+// IAM identity) don't force operators to provision a per-project SA.
 type K8sProvider struct {
-	sa              *corev1.ServiceAccount
+	saName          string
+	namespace       string
 	serviceAccounts v1.ServiceAccountInterface
 	pods            v1.PodInterface
+	cachedSA        *corev1.ServiceAccount
 }
 
 func (p *K8sProvider) DefaultRepositoryAuthenticator() repository.Authenticator {
 	return repository.NewHTTPTemplateAuthenticator()
 }
 
-// NewK8sProvider creates a new K8s passthrough provider
-func NewK8sProvider(clientset kubernetes.Interface, namespace string, sa *corev1.ServiceAccount) *K8sProvider {
+// NewK8sProvider creates a new K8s passthrough provider.
+func NewK8sProvider(clientset kubernetes.Interface, namespace, saName string) *K8sProvider {
 	coreV1 := clientset.CoreV1()
 	return &K8sProvider{
+		saName:          saName,
+		namespace:       namespace,
 		serviceAccounts: coreV1.ServiceAccounts(namespace),
 		pods:            coreV1.Pods(namespace),
-		sa:              sa,
 	}
+}
+
+// SAName returns the project-scoped service account name this provider is configured
+// to use. The SA may not exist in the cluster — see LoadSA for the actual fetch.
+func (p *K8sProvider) SAName() string { return p.saName }
+
+// Namespace returns the namespace the project-scoped service account lives in.
+func (p *K8sProvider) Namespace() string { return p.namespace }
+
+// LoadSA fetches and caches the project-scoped service account. Callers that need
+// annotations on the SA (IRSA role ARN, GCP/Azure client IDs, etc.) call this;
+// callers that only need to mint a TokenRequest (or rely on the pod's own identity,
+// like AWS Pod Identity) do not.
+func (p *K8sProvider) LoadSA(ctx context.Context) (*corev1.ServiceAccount, error) {
+	if p.cachedSA != nil {
+		return p.cachedSA, nil
+	}
+	sa, err := p.serviceAccounts.Get(ctx, p.saName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service account %s: %w", p.saName, err)
+	}
+	p.cachedSA = sa
+	return sa, nil
 }
 
 // GetToken requests a K8s token with the configured audience and returns it directly.
 // When running inside a pod, the token is bound to the current pod so that
 // pod-identity-aware validators (e.g. EKS Pod Identity) can verify the caller.
 func (p *K8sProvider) GetToken(ctx context.Context, audience, _ string) (*repository.Token, error) {
-	saName := p.sa.Name
 	if audience == "" {
 		// Default to the Kubernetes API server audience
 		audience = "kubernetes.default.svc"
 	}
 
 	log.WithFields(log.Fields{
-		"serviceAccount": saName,
+		"serviceAccount": p.saName,
 		"audience":       audience,
 	}).Info("K8s provider: requesting token for OIDC federation")
 
@@ -74,12 +103,12 @@ func (p *K8sProvider) GetToken(ctx context.Context, audience, _ string) (*reposi
 
 	resp, err := p.serviceAccounts.CreateToken(
 		ctx,
-		saName,
+		p.saName,
 		tokenRequest,
 		metav1.CreateOptions{},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create token for service account %s: %w", saName, err)
+		return nil, fmt.Errorf("failed to create token for service account %s: %w", p.saName, err)
 	}
 
 	return &repository.Token{

@@ -293,7 +293,6 @@ func NewAWSProvider(repo *v1alpha1.Repository, k8s *K8sProvider) *AWSProvider {
 // credential chain resolves to Pod Identity creds and we chain AssumeRole on top to
 // inject the argocd-project session tag. Otherwise we fall back to IRSA.
 func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL string) (*repository.Token, error) {
-	saName := p.k8s.sa.Name
 	// ECR region is derived from the repository URL — this is the region the ECR
 	// authenticator needs for GetAuthorizationToken, independent of where STS runs.
 	ecrRegion := extractAWSRegion(p.repo.Repo)
@@ -302,7 +301,7 @@ func (p *AWSProvider) GetToken(ctx context.Context, audience string, tokenURL st
 		token, err := p.getTokenViaPodIdentity(ctx, ecrRegion)
 		if err != nil {
 			log.WithFields(log.Fields{
-				"serviceAccount": saName,
+				"serviceAccount": p.k8s.SAName(),
 				"error":          err.Error(),
 			}).Warn("AWS Pod Identity: failed, falling back to IRSA")
 		} else {
@@ -448,8 +447,12 @@ func roleARNFromAssumedRoleARN(input string) (string, error) {
 // The SDK resolves its own region for STS (from AWS_REGION/AWS_DEFAULT_REGION injected by the
 // EKS webhook). ecrRegion is only used in the returned credentials for ECR GetAuthorizationToken.
 func (p *AWSProvider) getTokenViaIRSA(ctx context.Context, audience string, tokenURL string, ecrRegion string) (*repository.Token, error) {
-	saName := p.k8s.sa.Name
-	roleARN := p.k8s.sa.Annotations[AnnotationAWSRoleARN]
+	sa, err := p.k8s.LoadSA(ctx)
+	if err != nil {
+		return nil, err
+	}
+	saName := sa.Name
+	roleARN := sa.Annotations[AnnotationAWSRoleARN]
 	if roleARN == "" {
 		return nil, fmt.Errorf("service account %s missing %s annotation", saName, AnnotationAWSRoleARN)
 	}
