@@ -1,7 +1,9 @@
 package exec
 
 import (
+	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"sync"
 	"syscall"
@@ -337,4 +339,35 @@ func TestCancelGrace(t *testing.T) {
 		t.Cleanup(initTimeout)
 		assert.Equal(t, 3*time.Second, CancelGrace())
 	})
+}
+
+func TestTerminateRunning(t *testing.T) {
+	sentinel := path.Join(t.TempDir(), "started")
+	cmd := exec.CommandContext(t.Context(), "sh", "-c", "touch "+sentinel+"; sleep 30")
+	errCh := make(chan error, 1)
+	go func() {
+		// A timeout long enough that only TerminateRunning can end this command.
+		_, err := RunCommandExt(cmd, CmdOpts{Timeout: time.Minute})
+		errCh <- err
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(sentinel)
+		return err == nil
+	}, 10*time.Second, 5*time.Millisecond, "command never started")
+
+	assert.Equal(t, 1, TerminateRunning(syscall.SIGTERM))
+	select {
+	case err := <-errCh:
+		require.ErrorContains(t, err, "signal: terminated")
+	case <-time.After(10 * time.Second):
+		t.Fatal("command outlived TerminateRunning")
+	}
+	assert.Zero(t, TerminateRunning(syscall.SIGTERM), "a finished command must be untracked")
+}
+
+func TestTerminateRunningUntracksFinishedCommands(t *testing.T) {
+	_, err := RunCommandExt(exec.CommandContext(t.Context(), "true"), CmdOpts{Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Zero(t, TerminateRunning(syscall.SIGTERM))
 }

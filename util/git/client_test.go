@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	executil "github.com/argoproj/argo-cd/v3/util/exec"
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity"
 	"github.com/argoproj/argo-cd/v3/util/workloadidentity/mocks"
 )
@@ -2236,4 +2238,47 @@ func Test_nativeGitClient_CheckoutCancelled(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "signal: terminated", "checkout should have been terminated gracefully, not killed")
 	assert.NoFileExists(t, lockPath, "cancelled checkout left a stale index lock")
+}
+
+// Test_nativeGitClient_CheckoutTerminatedOnShutdown covers the shutdown path without relying on
+// context cancellation, which is how releases that still build git commands from context.Background()
+// behave: signalling in-flight commands is what lets git remove .git/index.lock before the container
+// is killed.
+func Test_nativeGitClient_CheckoutTerminatedOnShutdown(t *testing.T) {
+	tempDir := t.TempDir()
+	client, err := NewClientExt("file://"+tempDir, tempDir, NopCreds{}, true, false, "", "")
+	require.NoError(t, err)
+	require.NoError(t, client.Init())
+
+	readme := path.Join(client.Root(), "README")
+	require.NoError(t, os.WriteFile(readme, []byte("Hello.\n"), 0o600))
+	require.NoError(t, os.WriteFile(path.Join(client.Root(), ".gitattributes"), []byte("README filter=slow\n"), 0o600))
+	require.NoError(t, runCmd(t.Context(), client.Root(), "git", "config", "filter.slow.smudge", "sh -c 'touch .filter-started; sleep 10; cat'"))
+	require.NoError(t, runCmd(t.Context(), client.Root(), "git", "add", "README", ".gitattributes"))
+	require.NoError(t, runCmd(t.Context(), client.Root(), "git", "commit", "-m", "initial commit"))
+	sha, err := outputCmd(t.Context(), client.Root(), "git", "rev-parse", "HEAD")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(readme))
+
+	// The context stays alive throughout: only TerminateRunning ends this checkout.
+	lockPath := path.Join(client.Root(), ".git", "index.lock")
+	errCh := make(chan error, 1)
+	go func() {
+		_, checkoutErr := client.Checkout(t.Context(), strings.TrimSpace(string(sha)), false, true)
+		errCh <- checkoutErr
+	}()
+	require.Eventually(t, func() bool {
+		_, lockErr := os.Stat(lockPath)
+		_, filterErr := os.Stat(path.Join(client.Root(), ".filter-started"))
+		return lockErr == nil && filterErr == nil
+	}, 10*time.Second, 5*time.Millisecond, "git never reached the filter while holding the index lock")
+
+	assert.NotZero(t, executil.TerminateRunning(syscall.SIGTERM), "the checkout should have been tracked")
+	select {
+	case err = <-errCh:
+		require.Error(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("checkout outlived TerminateRunning")
+	}
+	assert.NoFileExists(t, lockPath, "shutdown left a stale index lock")
 }

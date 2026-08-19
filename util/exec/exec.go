@@ -264,6 +264,7 @@ func RunCommandExt(cmd *exec.Cmd, opts CmdOpts) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer trackRunning(cmd)()
 
 	done := make(chan error)
 	go func() { done <- cmd.Wait() }()

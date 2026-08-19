@@ -34,6 +34,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/util/cli"
 	"github.com/argoproj/argo-cd/v3/util/env"
 	"github.com/argoproj/argo-cd/v3/util/errors"
+	executil "github.com/argoproj/argo-cd/v3/util/exec"
 	"github.com/argoproj/argo-cd/v3/util/healthz"
 	"github.com/argoproj/argo-cd/v3/util/profile"
 	"github.com/argoproj/argo-cd/v3/util/sourceintegrity"
@@ -251,10 +252,10 @@ func NewCommand() *cobra.Command {
 				case <-time.After(shutdownDrainTimeout):
 					// GracefulStop waits for handlers without interrupting them, so a long manifest
 					// generation outlives the grace period and is SIGKILLed with the container.
-					// Cancelling lets git clean up; whatever still refuses to finish is left to the
+					// Signalling lets git clean up; whatever still refuses to finish is left to the
 					// kubelet's SIGKILL, since a deadline of our own could only cut that short.
-					log.Warnf("drain window of %v elapsed, cancelling in-flight requests", shutdownDrainTimeout)
-					server.CancelRequests()
+					signalled := executil.TerminateRunning(syscall.SIGTERM)
+					log.Warnf("drain window of %v elapsed, terminated %d in-flight commands", shutdownDrainTimeout, signalled)
 				}
 			})
 
