@@ -10,6 +10,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/util/argo"
 	"github.com/argoproj/argo-cd/v3/util/glob"
+	"github.com/argoproj/argo-cd/v3/util/oci"
 
 	"k8s.io/apimachinery/pkg/labels"
 )
@@ -142,7 +143,7 @@ func (a *ArgoCDWebhookHandler) HandleRegistryEvent(event *RegistryEvent) {
 // trailing slash to ensure consistent matching between webhook events
 // and Application source URLs.
 func normalizeOCI(url string) string {
-	url = strings.TrimPrefix(url, "oci://")
+	url = oci.TrimScheme(url)
 	url = strings.TrimSuffix(url, "/")
 	return strings.ToLower(url)
 }

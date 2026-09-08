@@ -3,6 +3,7 @@ package repository
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	logtest "github.com/sirupsen/logrus/hooks/test"
@@ -58,8 +59,6 @@ func TestValueFileResolver_ResolveValueFiles(t *testing.T) {
 				&v1alpha1.Env{},
 				[]string{"https", "http"},
 				nil, // no ref sources for this test
-				utilio.NewRandomizedTempPaths(t.TempDir()),
-				utilio.NewRandomizedTempPaths(t.TempDir()),
 				tt.ignoreMissingValueFiles,
 			)
 
@@ -89,8 +88,6 @@ func TestValueFileResolver_resolveRawPath_local(t *testing.T) {
 		&v1alpha1.Env{},
 		[]string{"https", "http"},
 		nil,
-		utilio.NewRandomizedTempPaths(t.TempDir()),
-		utilio.NewRandomizedTempPaths(t.TempDir()),
 		false,
 	)
 
@@ -150,31 +147,33 @@ func TestValueFileResolver_checkFileExists(t *testing.T) {
 	}
 }
 
+// refRootsFor builds refSourceRoots the way refSourceResolver.resolve does, looking each ref's
+// root up in paths by normalized repo URL.
+func refRootsFor(refSources map[string]*v1alpha1.RefTarget, paths utilio.TempPaths) *refSourceRoots {
+	refs := &refSourceRoots{roots: map[string]string{}}
+	for refVar, ref := range refSources {
+		refs.roots[refVar] = paths.GetPathIfExists(ref.Repo.NormalizeRepoURL())
+	}
+	return refs
+}
+
 func TestValueFileResolver_resolveRawPath_referenced(t *testing.T) {
-	// Test verifies resolution of referenced value files from both Git and OCI repositories.
-	// Neither ref source is present in the temp paths, so resolution returns an error rather
-	// than panicking - the point is that the ref branch is exercised for both URL schemes.
+	// A known ref whose source was not materialized must error out rather than fall through to
+	// env substitution against the main repo.
 	resolver := newValueFileResolver(
 		"/app",
 		"/repo",
 		&v1alpha1.Env{},
 		[]string{"https"},
-		map[string]*v1alpha1.RefTarget{
-			"$git": {Repo: v1alpha1.Repository{Repo: "https://github.com/test/repo.git"}},
-			"$oci": {Repo: v1alpha1.Repository{Repo: "oci://registry.example.com/chart"}},
-		},
-		utilio.NewRandomizedTempPaths(t.TempDir()),
-		utilio.NewRandomizedTempPaths(t.TempDir()),
+		&refSourceRoots{roots: map[string]string{"$git": "", "$oci": ""}},
 		false,
 	)
 
-	// Git ref source - repo not registered in temp paths, so it errors out.
 	_, err := resolver.resolveRawPath("$git/values.yaml")
-	require.Error(t, err)
+	require.ErrorContains(t, err, `source "$git" referenced by "$git/values.yaml" was not resolved`)
 
-	// OCI ref source - repo not registered in temp paths, so it errors out.
 	_, err = resolver.resolveRawPath("$oci/values.yaml")
-	require.Error(t, err)
+	require.ErrorContains(t, err, `source "$oci" referenced by "$oci/values.yaml" was not resolved`)
 }
 
 func TestValueFileResolver_resolveRawPath_OCIEffectiveRoot(t *testing.T) {
@@ -184,19 +183,12 @@ func TestValueFileResolver_resolveRawPath_OCIEffectiveRoot(t *testing.T) {
 	ociDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(ociDir, "values.yaml"), []byte("foo: bar"), 0o644))
 
-	ociPaths := utilio.NewRandomizedTempPaths(t.TempDir())
-	ociPaths.Add(v1alpha1.NormalizeOCIURL("oci://registry.example.com/chart"), ociDir)
-
 	resolver := newValueFileResolver(
 		"/app",
 		"/repo",
 		&v1alpha1.Env{},
 		[]string{"https"},
-		map[string]*v1alpha1.RefTarget{
-			"$oci": {Repo: v1alpha1.Repository{Repo: "oci://registry.example.com/chart"}},
-		},
-		utilio.NewRandomizedTempPaths(t.TempDir()),
-		ociPaths,
+		&refSourceRoots{roots: map[string]string{"$oci": ociDir}},
 		false,
 	)
 
@@ -217,19 +209,12 @@ func TestValueFileResolver_ResolveValueFiles_OCIGlob(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(ociDir, "a.yaml"), []byte("a: 1"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(ociDir, "b.yaml"), []byte("b: 2"), 0o644))
 
-	ociPaths := utilio.NewRandomizedTempPaths(t.TempDir())
-	ociPaths.Add(v1alpha1.NormalizeOCIURL("oci://registry.example.com/chart"), ociDir)
-
 	resolver := newValueFileResolver(
 		appPath,
 		repoRoot,
 		&v1alpha1.Env{},
 		[]string{"https"},
-		map[string]*v1alpha1.RefTarget{
-			"$oci": {Repo: v1alpha1.Repository{Repo: "oci://registry.example.com/chart"}},
-		},
-		utilio.NewRandomizedTempPaths(t.TempDir()),
-		ociPaths,
+		&refSourceRoots{roots: map[string]string{"$oci": ociDir}},
 		false,
 	)
 
@@ -241,42 +226,29 @@ func TestValueFileResolver_ResolveValueFiles_OCIGlob(t *testing.T) {
 	}, result)
 }
 
-func TestGetResolvedOCIRefValueFile_NormalizedLookup(t *testing.T) {
-	// Extracted OCI paths are registered under the normalized repo URL
-	// (Repository.NormalizeRepoURL), so a ref source whose URL differs only in
-	// scheme/host case must still resolve to the registered path.
-	extractedDir := t.TempDir()
-	valuesPath := filepath.Join(extractedDir, "values.yaml")
-	require.NoError(t, os.WriteFile(valuesPath, []byte("foo: bar"), 0o644))
-
-	ociPaths := utilio.NewRandomizedTempPaths(t.TempDir())
-	ociPaths.Add(v1alpha1.NormalizeOCIURL("oci://Registry.Example.com/chart"), extractedDir)
-
-	resolved, err := getResolvedOCIRefValueFile(
-		"$oci/values.yaml",
-		&v1alpha1.Env{},
-		[]string{"https"},
-		"oci://REGISTRY.EXAMPLE.COM/chart",
-		ociPaths,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, pathutil.ResolvedFilePath(valuesPath), resolved)
+// TestResolveRefValueFile_RejectsPathWithoutFile: a $ref entry with no file path after the ref
+// name (e.g. "$ref", "$ref/") must be rejected rather than resolving to the ref source's root.
+func TestResolveRefValueFile_RejectsPathWithoutFile(t *testing.T) {
+	root := t.TempDir()
+	for _, raw := range []string{"$ref", "$ref/", "$ref//"} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := resolveRefValueFile(raw, &v1alpha1.Env{}, []string{"https"}, root)
+			require.ErrorContains(t, err, "no file path after the ref name")
+		})
+	}
 }
 
-// TestGetResolvedOCIRefValueFile_RejectsPathWithoutFile is a regression test: a $ref entry with
-// no file path after the ref name (e.g. "$oci", "$oci/") must be rejected rather than resolving
-// to the OCI extraction root. The previous len(pathStrings)==0 guard was unreachable
-// (strings.Split always returns at least one element) and did not catch these.
-func TestGetResolvedOCIRefValueFile_RejectsPathWithoutFile(t *testing.T) {
-	extractedDir := t.TempDir()
-	ociPaths := utilio.NewRandomizedTempPaths(t.TempDir())
-	ociPaths.Add(v1alpha1.NormalizeOCIURL("oci://registry.example.com/chart"), extractedDir)
-
-	for _, raw := range []string{"$oci", "$oci/", "$oci//"} {
+// TestResolveRefValueFile_NeverRemote: the path after "$ref/" is always relative to the referenced
+// source, even when it (or its env substitution) parses as a URL. Otherwise "$ref/https://..." would
+// be handed to helm as a remote value file.
+func TestResolveRefValueFile_NeverRemote(t *testing.T) {
+	root := t.TempDir()
+	env := &v1alpha1.Env{{Name: "ARGOCD_ENV_VALUES_URL", Value: "https://example.com/values.yaml"}}
+	for _, raw := range []string{"$ref/https://example.com/values.yaml", "$ref/$ARGOCD_ENV_VALUES_URL"} {
 		t.Run(raw, func(t *testing.T) {
-			_, err := getResolvedOCIRefValueFile(raw, &v1alpha1.Env{}, []string{"https"}, "oci://registry.example.com/chart", ociPaths)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "no file path after the ref name")
+			resolved, err := resolveRefValueFile(raw, env, []string{"https"}, root)
+			require.NoError(t, err)
+			assert.True(t, strings.HasPrefix(string(resolved), root+string(filepath.Separator)), "resolved %q is outside %q", resolved, root)
 		})
 	}
 }
@@ -291,19 +263,12 @@ func TestValueFileResolver_ResolveValueFiles_DoesNotLogResolvedPaths(t *testing.
 	ociDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(ociDir, "a.yaml"), []byte("a: 1"), 0o644))
 
-	ociPaths := utilio.NewRandomizedTempPaths(t.TempDir())
-	ociPaths.Add(v1alpha1.NormalizeOCIURL("oci://registry.example.com/chart"), ociDir)
-
 	resolver := newValueFileResolver(
 		appPath,
 		repoRoot,
 		&v1alpha1.Env{},
 		[]string{"https"},
-		map[string]*v1alpha1.RefTarget{
-			"$oci": {Repo: v1alpha1.Repository{Repo: "oci://registry.example.com/chart"}},
-		},
-		utilio.NewRandomizedTempPaths(t.TempDir()),
-		ociPaths,
+		&refSourceRoots{roots: map[string]string{"$oci": ociDir}},
 		false,
 	)
 
@@ -318,5 +283,17 @@ func TestValueFileResolver_ResolveValueFiles_DoesNotLogResolvedPaths(t *testing.
 		msg, err := entry.String()
 		require.NoError(t, err)
 		assert.NotContains(t, msg, ociDir, "log entry leaked the OCI extraction directory")
+	}
+}
+
+func Test_getReferencedSourceName(t *testing.T) {
+	for raw, want := range map[string]string{
+		"$ref/values.yaml": "$ref",
+		"$ref":             "$ref",
+		"$ref/":            "$ref",
+		"values.yaml":      "",
+		"":                 "",
+	} {
+		assert.Equal(t, want, getReferencedSourceName(raw), raw)
 	}
 }

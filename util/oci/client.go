@@ -47,20 +47,40 @@ var (
 const (
 	helmOCIConfigType = "application/vnd.cncf.helm.config.v1+json"
 	helmOCILayerType  = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
-	ociURLPrefix      = "oci://"
+	// URLPrefix is the scheme marking a repository URL as an OCI registry reference.
+	URLPrefix = "oci://"
 )
 
-// trimOCIScheme removes the oci:// scheme from a repository URL. The scheme is matched
-// case-insensitively and surrounding whitespace is trimmed, mirroring how
-// v1alpha1.IsOCIURL/NormalizeOCIURL classify OCI URLs; otherwise non-canonical but accepted
-// forms such as "OCI://…" or " oci://… " would reach ORAS with the scheme/whitespace intact
-// and fail repository initialization.
-func trimOCIScheme(repoURL string) string {
+// IsURL reports whether repoURL is an OCI registry URL. The scheme is matched case-insensitively
+// and surrounding whitespace is ignored, so classification, TrimScheme and NormalizeURL agree.
+func IsURL(repoURL string) bool {
 	trimmed := strings.TrimSpace(repoURL)
-	if len(trimmed) >= len(ociURLPrefix) && strings.EqualFold(trimmed[:len(ociURLPrefix)], ociURLPrefix) {
-		return trimmed[len(ociURLPrefix):]
+	return len(trimmed) >= len(URLPrefix) && strings.EqualFold(trimmed[:len(URLPrefix)], URLPrefix)
+}
+
+// TrimScheme returns repoURL without surrounding whitespace and, if present, the oci:// scheme.
+func TrimScheme(repoURL string) string {
+	trimmed := strings.TrimSpace(repoURL)
+	if IsURL(trimmed) {
+		return trimmed[len(URLPrefix):]
 	}
 	return trimmed
+}
+
+// NormalizeURL returns a canonical form of an OCI repository URL for map keys and equality
+// checks: the scheme and host are lowercased (RFC 3986), the repository path is preserved because
+// OCI repository names are case-sensitive, and the oci:// prefix is kept to avoid collisions with
+// Git URLs. Non-OCI URLs are returned unchanged.
+func NormalizeURL(repoURL string) string {
+	if !IsURL(repoURL) {
+		return repoURL
+	}
+	host, repoPath, hasPath := strings.Cut(TrimScheme(repoURL), "/")
+	normalized := URLPrefix + strings.ToLower(host)
+	if hasPath {
+		normalized += "/" + repoPath
+	}
+	return normalized
 }
 
 var _ Client = &nativeOCIClient{}
@@ -136,7 +156,7 @@ func NewClient(repoURL string, creds Creds, proxy, noProxy string, layerMediaTyp
 }
 
 func NewClientWithLock(repoURL string, creds Creds, repoLock sync.KeyLock, proxyURL, noProxy string, layerMediaTypes []string, opts ...ClientOpts) (Client, error) {
-	ociRepo := trimOCIScheme(repoURL)
+	ociRepo := TrimScheme(repoURL)
 	repo, err := remote.NewRepository(ociRepo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize repository: %w", err)

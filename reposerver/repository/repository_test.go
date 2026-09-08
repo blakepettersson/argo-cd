@@ -184,6 +184,7 @@ func newServiceWithMocks(t *testing.T, root string) (*Service, *gitmocks.Client,
 		ociClient.EXPECT().GetTags(mock.Anything, mock.Anything).Return(nil, nil)
 		ociClient.EXPECT().ResolveRevision(mock.Anything, mock.Anything, mock.Anything).Return("", nil)
 		ociClient.EXPECT().Extract(mock.Anything, mock.Anything).Return("./testdata/my-chart", utilio.NopCloser, nil)
+		ociClient.EXPECT().CleanCache(mock.Anything).Return(nil)
 
 		paths.EXPECT().Add(mock.Anything, mock.Anything).Return()
 		paths.EXPECT().GetPath(mock.Anything).Return(root, nil)
@@ -895,7 +896,7 @@ func TestResolveReferencedSources_RejectsChartOnRefSource(t *testing.T) {
 				"$ref": {Repo: tt.refRepo, Chart: "my-chart", TargetRevision: "1.0.0"},
 			}
 			// The guard rejects before any client getter is invoked, so an empty resolver is safe.
-			_, err := resolveReferencedSources(t.Context(), true, helmSource, refSources, refSourceResolver{})
+			_, err := (&refSourceResolver{}).resolveRevisions(t.Context(), refSourceCandidates(helmSource), refSources, false)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "'chart' field defined")
 		})
@@ -909,11 +910,11 @@ func TestResolveReferencedSources_AllowsOCIRefWithoutChart(t *testing.T) {
 	refSources := map[string]*v1alpha1.RefTarget{
 		"$ref": {Repo: v1alpha1.Repository{Repo: "oci://registry.example.com/charts"}, TargetRevision: "1.0.0"},
 	}
-	ociGetter := func(_ context.Context, _ *v1alpha1.Repository, _ string, _ bool) (oci.Client, string, error) {
-		return nil, "sha256:deadbeef", nil
-	}
+	ociClient := ocimocks.NewClient(t)
+	ociClient.EXPECT().ResolveRevision(mock.Anything, "1.0.0", false).Return("sha256:deadbeef", nil)
+	resolver := &refSourceResolver{newOCIClient: func(*v1alpha1.Repository) (oci.Client, error) { return ociClient, nil }}
 
-	repoRefs, err := resolveReferencedSources(t.Context(), true, helmSource, refSources, refSourceResolver{newOCIClientResolveRevision: ociGetter})
+	repoRefs, err := resolver.resolveRevisions(t.Context(), refSourceCandidates(helmSource), refSources, false)
 	require.NoError(t, err)
 	assert.Equal(t, "sha256:deadbeef", repoRefs[v1alpha1.NormalizeOCIURL("oci://registry.example.com/charts")])
 }
@@ -984,11 +985,10 @@ func TestRedactPaths_RedactsGitAndOCIPaths(t *testing.T) {
 	ociDir := t.TempDir()
 	gitPaths := utilio.NewRandomizedTempPaths(t.TempDir())
 	gitPaths.Add("git-key", gitDir)
-	ociPaths := utilio.NewRandomizedTempPaths(t.TempDir())
-	ociPaths.Add("oci-key", ociDir)
+	refs := &refSourceRoots{roots: map[string]string{"$oci": ociDir}}
 
 	cmd := fmt.Sprintf("helm template . --values %s/values.yaml --values %s/oci-values.yaml", gitDir, ociDir)
-	got := redactPaths(cmd, "", gitPaths, ociPaths)
+	got := redactPaths(cmd, "", redactablePaths(gitPaths, refs)...)
 
 	assert.NotContains(t, got, gitDir)
 	assert.NotContains(t, got, ociDir)
@@ -999,13 +999,11 @@ func TestRedactPaths_RedactsGitAndOCIPaths(t *testing.T) {
 // including OCI-extracted value file paths) are redacted before being returned.
 func TestRedactPathsInError_RedactsOCIPath(t *testing.T) {
 	ociDir := t.TempDir()
-	ociPaths := utilio.NewRandomizedTempPaths(t.TempDir())
-	ociPaths.Add("oci-key", ociDir)
 
-	require.NoError(t, redactPathsInError(nil, "", ociPaths))
+	require.NoError(t, redactPathsInError(nil, "", ociDir))
 
 	err := fmt.Errorf("failed to render: open %s/oci-values.yaml: no such file", ociDir)
-	got := redactPathsInError(err, "", ociPaths)
+	got := redactPathsInError(err, "", ociDir)
 	require.Error(t, got)
 	assert.NotContains(t, got.Error(), ociDir)
 	assert.Contains(t, got.Error(), "./oci-values.yaml")
@@ -1013,7 +1011,7 @@ func TestRedactPathsInError_RedactsOCIPath(t *testing.T) {
 	// The message is redacted, but the original error identity is preserved so callers can
 	// still match sentinels/types via errors.Is/errors.As (e.g. context cancellation).
 	sentinel := fmt.Errorf("open %s/oci-values.yaml: %w", ociDir, context.Canceled)
-	wrapped := redactPathsInError(sentinel, "", ociPaths)
+	wrapped := redactPathsInError(sentinel, "", ociDir)
 	assert.NotContains(t, wrapped.Error(), ociDir)
 	assert.ErrorIs(t, wrapped, context.Canceled)
 }
@@ -3784,7 +3782,6 @@ func Test_walkHelmValueFilesInPath(t *testing.T) {
 func Test_populateHelmAppDetails(t *testing.T) {
 	sha := "632039659e542ed7de0c170a4fcc1c571b288fc0"
 	service := newService(t, ".")
-	emptyTempPaths := utilio.NewRandomizedTempPaths(t.TempDir())
 	res := apiclient.RepoAppDetailsResponse{}
 	q := apiclient.RepoServerAppDetailsQuery{
 		Repo: &v1alpha1.Repository{},
@@ -3794,7 +3791,7 @@ func Test_populateHelmAppDetails(t *testing.T) {
 	}
 	appPath, err := filepath.Abs("./testdata/values-files/")
 	require.NoError(t, err)
-	err = service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, sha, "main", &q, emptyTempPaths)
+	err = service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, sha, "main", &q, nil)
 	require.NoError(t, err)
 	assert.Len(t, res.Helm.Parameters, 3)
 	assert.Len(t, res.Helm.ValueFiles, 5)
@@ -3818,7 +3815,6 @@ func Test_populateHelmAppDetailsWithRef(t *testing.T) {
 	refTargetRevision := targetRevision
 	refTargetRevision2 := "dev"
 	refSha := "999932039659e542ed7de0c170a4fcc1c5799999"
-	refSha2 := "777732039659e542ed7de0c170a4fcc1c5777777"
 	absRefRoot, err := filepath.Abs(refRoot)
 	require.NoError(t, err)
 	queryTemplate := apiclient.RepoServerAppDetailsQuery{
@@ -3965,24 +3961,22 @@ func Test_populateHelmAppDetailsWithRef(t *testing.T) {
 			mockOpts: func(_ *gitmocks.Client, _ *helmmocks.Client, _ *ocimocks.Client, paths *iomocks.TempPaths) {
 				paths.EXPECT().GetPath(repoURL).Return(repoRoot, nil)
 				paths.EXPECT().GetPath(refRepoURL).Return(refRoot, nil)
-				paths.EXPECT().GetPath(refRepoURL).Return(refRoot, nil)
 			},
 			newGitClient: func(_ string, _ string, _ git.Creds, _ bool, _ bool, _ string, _ string, _ ...git.ClientOpts) (gitClient git.Client, e error) {
 				client := gitmocks.Client{}
 				client.EXPECT().LsRemote("main").Return(refSha, nil)
-				client.EXPECT().LsRemote("dev").Return(refSha2, nil)
 				client.EXPECT().Root().Return(refRoot)
 				client.EXPECT().Init().Return(nil)
 				client.EXPECT().IsRevisionPresent(mock.Anything, refSha).Return(true)
-				client.EXPECT().IsRevisionPresent(mock.Anything, refSha2).Return(true)
 				client.EXPECT().Checkout(mock.Anything, refSha, false, true).Return("", nil)
-				client.EXPECT().Checkout(mock.Anything, refSha2, false, true).Return("", nil)
 				return &client, nil
 			},
 
 			testResults: func(t *testing.T) {
 				t.Helper()
-				expMsg := fmt.Sprintf("cannot reference multiple revisions for the same repository (%s references %q which resolves to %q while %s references %q which resolves to %q", refNameB, refTargetRevision2, refSha2, refNameA, refTargetRevision, refSha)
+				// The conflict is detected on the requested revisions before the second ref is
+				// resolved, as in manifest generation.
+				expMsg := fmt.Sprintf("cannot reference multiple revisions for the same repository (%s references %q while %s references %q)", refNameB, refTargetRevision2, refNameA, refTargetRevision)
 				require.Error(t, err)
 				require.ErrorContains(t, err, expMsg)
 			},
@@ -4004,9 +3998,10 @@ func Test_populateHelmAppDetailsWithRef(t *testing.T) {
 			},
 			testResults: func(t *testing.T) {
 				t.Helper()
-				expMsg := fmt.Sprintf("error setting up git client for %s and resolving revision %s: %s", refRepoURL, "main", dummyErrMsg)
 				require.Error(t, err)
-				require.ErrorContains(t, err, expMsg)
+				require.ErrorContains(t, err, "failed to get git client for repo "+refRepoURL)
+				// The underlying cause is logged, not returned to the client.
+				assert.NotContains(t, err.Error(), dummyErrMsg)
 			},
 		},
 		{
@@ -4102,7 +4097,7 @@ func Test_populateHelmAppDetailsWithRef(t *testing.T) {
 			appPath, err = filepath.Abs(repoRoot)
 			require.NoError(t, err)
 			res = apiclient.RepoAppDetailsResponse{}
-			err = service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, sha, "main", &query, service.gitRepoPaths)
+			err = service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, sha, "main", &query, nil)
 			tc.testResults(t)
 		})
 	}
@@ -4117,7 +4112,6 @@ func Test_populateHelmAppDetailsWithOCIRef(t *testing.T) {
 
 	appPath, err := filepath.Abs("./testdata/my-chart/")
 	require.NoError(t, err)
-	emptyTempPaths := utilio.NewRandomizedTempPaths(t.TempDir())
 
 	ociRef := func(revision string) *v1alpha1.RefTarget {
 		return &v1alpha1.RefTarget{
@@ -4149,7 +4143,7 @@ func Test_populateHelmAppDetailsWithOCIRef(t *testing.T) {
 
 		q := newQuery(map[string]*v1alpha1.RefTarget{"$values": ociRef("v1.0.0")}, "$values/values.yaml")
 		res := apiclient.RepoAppDetailsResponse{}
-		require.NoError(t, service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, emptyTempPaths))
+		require.NoError(t, service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, nil))
 		assert.Equal(t, []*v1alpha1.HelmParameter{{Name: "from", Value: "oci"}}, res.Helm.Parameters)
 	})
 
@@ -4166,7 +4160,7 @@ func Test_populateHelmAppDetailsWithOCIRef(t *testing.T) {
 
 		q := newQuery(map[string]*v1alpha1.RefTarget{"$values": ociRef("v1.0.0")}, "$values/values.yaml")
 		res := apiclient.RepoAppDetailsResponse{}
-		require.NoError(t, service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, emptyTempPaths))
+		require.NoError(t, service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, nil))
 		assert.True(t, closed, "the OCI closer must run before populateHelmAppDetails returns")
 	})
 
@@ -4181,7 +4175,7 @@ func Test_populateHelmAppDetailsWithOCIRef(t *testing.T) {
 
 		q := newQuery(map[string]*v1alpha1.RefTarget{"$a": ociRef("v1.0.0"), "$b": ociRef("v1.0.0")}, "$a/values.yaml", "$b/values.yaml")
 		res := apiclient.RepoAppDetailsResponse{}
-		require.NoError(t, service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, emptyTempPaths))
+		require.NoError(t, service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, nil))
 		ociClient.AssertNumberOfCalls(t, "Extract", 1)
 	})
 
@@ -4194,7 +4188,7 @@ func Test_populateHelmAppDetailsWithOCIRef(t *testing.T) {
 
 		q := newQuery(map[string]*v1alpha1.RefTarget{"$a": ociRef("v1.0.0"), "$b": ociRef("v2.0.0")}, "$a/values.yaml", "$b/values.yaml")
 		res := apiclient.RepoAppDetailsResponse{}
-		err := service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, emptyTempPaths)
+		err := service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, nil)
 		require.ErrorContains(t, err, "cannot reference multiple revisions for the same repository")
 	})
 
@@ -4206,7 +4200,7 @@ func Test_populateHelmAppDetailsWithOCIRef(t *testing.T) {
 
 		q := newQuery(map[string]*v1alpha1.RefTarget{"$values": ociRef("v1.0.0")}, "$values/values.yaml")
 		res := apiclient.RepoAppDetailsResponse{}
-		err := service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, emptyTempPaths)
+		err := service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, nil)
 		require.ErrorContains(t, err, "failed to extract OCI image")
 		// The underlying cause must not leak to the client.
 		assert.NotContains(t, err.Error(), "layer digest mismatch")
@@ -4219,18 +4213,17 @@ func Test_populateHelmAppDetailsWithOCIRef(t *testing.T) {
 
 		q := newQuery(map[string]*v1alpha1.RefTarget{"$values": ociRef("v1.0.0")}, "my-chart-values.yaml")
 		res := apiclient.RepoAppDetailsResponse{}
-		require.NoError(t, service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, emptyTempPaths))
+		require.NoError(t, service.populateHelmAppDetails(t.Context(), &res, appPath, appPath, "sha", "main", &q, nil))
 	})
 }
 
 func Test_populateHelmAppDetails_values_symlinks(t *testing.T) {
 	service := newService(t, ".")
 	sha := "632039659e542ed7de0c170a4fcc1c571b288fc0"
-	emptyTempPaths := utilio.NewRandomizedTempPaths(t.TempDir())
 	t.Run("inbound", func(t *testing.T) {
 		res := apiclient.RepoAppDetailsResponse{}
 		q := apiclient.RepoServerAppDetailsQuery{Repo: &v1alpha1.Repository{}, Source: &v1alpha1.ApplicationSource{}}
-		err := service.populateHelmAppDetails(t.Context(), &res, "./testdata/in-bounds-values-file-link/", "./testdata/in-bounds-values-file-link/", "dummy_sha", "main", &q, emptyTempPaths)
+		err := service.populateHelmAppDetails(t.Context(), &res, "./testdata/in-bounds-values-file-link/", "./testdata/in-bounds-values-file-link/", "dummy_sha", "main", &q, nil)
 		require.NoError(t, err)
 		assert.NotEmpty(t, res.Helm.Values)
 		assert.NotEmpty(t, res.Helm.Parameters)
@@ -4239,7 +4232,7 @@ func Test_populateHelmAppDetails_values_symlinks(t *testing.T) {
 	t.Run("out of bounds", func(t *testing.T) {
 		res := apiclient.RepoAppDetailsResponse{}
 		q := apiclient.RepoServerAppDetailsQuery{Repo: &v1alpha1.Repository{}, Source: &v1alpha1.ApplicationSource{}}
-		err := service.populateHelmAppDetails(t.Context(), &res, "./testdata/out-of-bounds-values-file-link/", "./testdata/out-of-bounds-values-file-link/", sha, "main", &q, emptyTempPaths)
+		err := service.populateHelmAppDetails(t.Context(), &res, "./testdata/out-of-bounds-values-file-link/", "./testdata/out-of-bounds-values-file-link/", sha, "main", &q, nil)
 		require.NoError(t, err)
 		assert.Empty(t, res.Helm.Values)
 		assert.Empty(t, res.Helm.Parameters)
@@ -4478,7 +4471,7 @@ func Test_getResolvedValueFiles(t *testing.T) {
 		tcc := tc
 		t.Run(tcc.name, func(t *testing.T) {
 			t.Parallel()
-			resolvedPaths, err := getResolvedValueFiles(path.Join(tempDir, "main-repo"), path.Join(tempDir, "main-repo"), tcc.env, []string{}, []string{tcc.rawPath}, tcc.refSources, paths, paths, false)
+			resolvedPaths, err := getResolvedValueFiles(path.Join(tempDir, "main-repo"), path.Join(tempDir, "main-repo"), tcc.env, []string{}, []string{tcc.rawPath}, refRootsFor(tcc.refSources, paths), false)
 			if !tcc.expectedErr {
 				require.NoError(t, err)
 				require.Len(t, resolvedPaths, 1)
@@ -4701,7 +4694,7 @@ func Test_getResolvedValueFiles_glob(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			repoPath := path.Join(tempDir, "main-repo")
-			resolvedPaths, err := getResolvedValueFiles(repoPath, repoPath, tt.env, []string{}, []string{tt.rawPath}, tt.refSources, paths, paths, tt.ignoreMissingValueFiles)
+			resolvedPaths, err := getResolvedValueFiles(repoPath, repoPath, tt.env, []string{}, []string{tt.rawPath}, refRootsFor(tt.refSources, paths), tt.ignoreMissingValueFiles)
 			if tt.expectedErr {
 				require.Error(t, err)
 				return
@@ -4728,7 +4721,7 @@ func Test_getResolvedValueFiles_glob(t *testing.T) {
 				"envs/*.yaml", // glob - z.yaml is explicit so skipped; only a.yaml added
 				"envs/z.yaml", // explicit - placed last, highest precedence
 			},
-			map[string]*v1alpha1.RefTarget{}, paths, paths, false,
+			nil, false,
 		)
 		require.NoError(t, err)
 		require.Len(t, resolvedPaths, 2)
@@ -4746,7 +4739,7 @@ func Test_getResolvedValueFiles_glob(t *testing.T) {
 				"prod/a.yaml", // explicit locks in position 0
 				"prod/*.yaml", // glob - a.yaml already seen, only b.yaml is new
 			},
-			map[string]*v1alpha1.RefTarget{}, paths, paths, false,
+			nil, false,
 		)
 		require.NoError(t, err)
 		require.Len(t, resolvedPaths, 2)
@@ -4764,7 +4757,7 @@ func Test_getResolvedValueFiles_glob(t *testing.T) {
 				"prod/*.yaml", // glob - a.yaml is explicit so skipped; only b.yaml added (pos 0)
 				"prod/a.yaml", // explicit - placed here at pos 1 (highest precedence)
 			},
-			map[string]*v1alpha1.RefTarget{}, paths, paths, false,
+			nil, false,
 		)
 		require.NoError(t, err)
 		require.Len(t, resolvedPaths, 2)
@@ -4782,7 +4775,7 @@ func Test_getResolvedValueFiles_glob(t *testing.T) {
 				"prod/*.yaml",    // adds a.yaml, b.yaml
 				"prod/**/*.yaml", // a.yaml, b.yaml already seen; adds nested/c.yaml, nested/d.yaml
 			},
-			map[string]*v1alpha1.RefTarget{}, paths, paths, false,
+			nil, false,
 		)
 		require.NoError(t, err)
 		require.Len(t, resolvedPaths, 4)
@@ -4805,7 +4798,7 @@ func Test_getResolvedValueFiles_glob(t *testing.T) {
 				"prod/**/*.yaml",     // a.yaml, b.yaml, nested/c.yaml all explicit and skipped; nested/d.yaml added - pos 2
 				"prod/nested/c.yaml", // explicit - pos 3
 			},
-			map[string]*v1alpha1.RefTarget{}, paths, paths, false,
+			nil, false,
 		)
 		require.NoError(t, err)
 		require.Len(t, resolvedPaths, 4)
@@ -4832,9 +4825,14 @@ func Test_verifyGlobMatchesWithinRoot(t *testing.T) {
 	require.NoError(t, os.WriteFile(inRepoFile, []byte{}, 0o644))
 	require.NoError(t, os.WriteFile(outsideFile, []byte("password: hunter2"), 0o644))
 
-	// Symlink inside repo → file inside repo (safe)
+	// Symlink inside repo → file inside repo (safe). Targets are relative: an absolute target is
+	// out of bounds regardless of where it points, matching CheckOutOfBoundsSymlinks.
 	inRepoLink := filepath.Join(repoDir, "values", "inrepo-link.yaml")
-	require.NoError(t, os.Symlink(inRepoFile, inRepoLink))
+	require.NoError(t, os.Symlink("real.yaml", inRepoLink))
+
+	// Absolute symlink inside repo → file inside repo (rejected)
+	absLink := filepath.Join(repoDir, "values", "abs-link.yaml")
+	require.NoError(t, os.Symlink(inRepoFile, absLink))
 
 	// Symlink inside repo → file outside repo (escape)
 	escapeLink := filepath.Join(repoDir, "values", "escape-link.yaml")
@@ -4842,11 +4840,11 @@ func Test_verifyGlobMatchesWithinRoot(t *testing.T) {
 
 	// Two-hop symlink: inside repo → another symlink (still inside) → file inside repo
 	hop1 := filepath.Join(repoDir, "values", "hop1.yaml")
-	require.NoError(t, os.Symlink(inRepoLink, hop1)) // hop1 → inRepoLink → real.yaml
+	require.NoError(t, os.Symlink("inrepo-link.yaml", hop1)) // hop1 → inRepoLink → real.yaml
 
 	// Two-hop symlink: inside repo → another symlink (inside repo) → file outside repo
 	hop2 := filepath.Join(repoDir, "values", "hop2.yaml")
-	require.NoError(t, os.Symlink(escapeLink, hop2)) // hop2 → escape-link → secret.yaml
+	require.NoError(t, os.Symlink("escape-link.yaml", hop2)) // hop2 → escape-link → secret.yaml
 
 	tests := []struct {
 		name        string
@@ -4869,6 +4867,18 @@ func Test_verifyGlobMatchesWithinRoot(t *testing.T) {
 		{
 			name:        "symlink pointing directly outside root is rejected",
 			matches:     []string{escapeLink},
+			expectErr:   true,
+			errContains: "resolved to outside repository root",
+		},
+		{
+			name:        "absolute symlink is rejected even when it points inside root",
+			matches:     []string{absLink},
+			expectErr:   true,
+			errContains: "resolved to outside repository root",
+		},
+		{
+			name:        "match outside root is rejected without a symlink",
+			matches:     []string{outsideFile},
 			expectErr:   true,
 			errContains: "resolved to outside repository root",
 		},
@@ -4916,7 +4926,6 @@ func Test_getResolvedValueFiles_glob_symlink_escape(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	paths := utilio.NewRandomizedTempPaths(tempDir)
 
 	repoDir := filepath.Join(tempDir, "repo")
 	outsideDir := filepath.Join(tempDir, "outside")
@@ -4928,7 +4937,7 @@ func Test_getResolvedValueFiles_glob_symlink_escape(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.yaml"), []byte("password: hunter2"), 0o644))
 	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "secret.yaml"), filepath.Join(repoDir, "values", "escape.yaml")))
 
-	_, err := getResolvedValueFiles(repoDir, repoDir, &v1alpha1.Env{}, []string{}, []string{"values/*.yaml"}, map[string]*v1alpha1.RefTarget{}, paths, paths, false)
+	_, err := getResolvedValueFiles(repoDir, repoDir, &v1alpha1.Env{}, []string{}, []string{"values/*.yaml"}, nil, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "resolved to outside repository root")
 }
@@ -4986,68 +4995,6 @@ func Test_isGlobPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
 			assert.Equal(t, tt.expected, isGlobPath(tt.path))
-		})
-	}
-}
-
-func Test_getReferencedSource(t *testing.T) {
-	t.Parallel()
-
-	refTarget := &v1alpha1.RefTarget{
-		Repo: v1alpha1.Repository{
-			Repo: "https://github.com/org/repo1",
-		},
-	}
-	tests := []struct {
-		name         string
-		rawValueFile string
-		refSources   map[string]*v1alpha1.RefTarget
-		expected     *v1alpha1.RefTarget
-	}{
-		{
-			name:         "ref with file path found in map",
-			rawValueFile: "$ref/values.yaml",
-			refSources: map[string]*v1alpha1.RefTarget{
-				"$ref": refTarget,
-			},
-			expected: refTarget,
-		},
-		{
-			name:         "ref with file path not in map",
-			rawValueFile: "$ref/values.yaml",
-			refSources:   map[string]*v1alpha1.RefTarget{},
-			expected:     nil,
-		},
-		{
-			name:         "bare ref without file path found in map",
-			rawValueFile: "$ref",
-			refSources: map[string]*v1alpha1.RefTarget{
-				"$ref": refTarget,
-			},
-			expected: refTarget,
-		},
-		{
-			name:         "empty string returns nil",
-			rawValueFile: "",
-			refSources: map[string]*v1alpha1.RefTarget{
-				"$ref": refTarget,
-			},
-			expected: nil,
-		},
-		{
-			name:         "no $ prefix returns nil",
-			rawValueFile: "values.yaml",
-			refSources: map[string]*v1alpha1.RefTarget{
-				"$ref": refTarget,
-			},
-			expected: nil,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			result := getReferencedSource(tt.rawValueFile, tt.refSources)
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

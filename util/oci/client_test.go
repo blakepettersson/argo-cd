@@ -868,7 +868,7 @@ func TestTrimOCIScheme(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expected, trimOCIScheme(tt.repoURL))
+			assert.Equal(t, tt.expected, TrimScheme(tt.repoURL))
 		})
 	}
 }

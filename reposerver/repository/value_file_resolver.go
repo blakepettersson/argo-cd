@@ -2,56 +2,103 @@ package repository
 
 import (
 	"fmt"
+	goio "io"
 	"os"
-	"sort"
+	"path/filepath"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
-	"github.com/argoproj/argo-cd/v3/util/git"
-	utilio "github.com/argoproj/argo-cd/v3/util/io"
+	"github.com/argoproj/argo-cd/v3/reposerver/cache"
 	pathutil "github.com/argoproj/argo-cd/v3/util/io/path"
 )
 
-// valueFileResolver handles resolution of Helm value files from various sources
+// refSourceRoots holds the sources referenced by Helm value files ("$ref/...") as materialized
+// on disk for the current request: a Git checkout or an extracted OCI artifact per ref. It is
+// produced by refSourceResolver.resolve and consumed by valueFileResolver. Close releases the
+// underlying repo/OCI locks and must be called once the value files have been read.
+type refSourceRoots struct {
+	// roots maps a ref variable (e.g. "$values") to its root directory. A known ref that was not
+	// materialized for this request is present with an empty root.
+	roots map[string]string
+	// revisions maps each referenced repository (normalized URL) to the commit SHA or OCI digest it
+	// resolved to; it feeds the manifest cache key.
+	revisions cache.ResolvedRevisions
+	closer    goio.Closer
+}
+
+// root returns the on-disk root for refVar and whether refVar names a ref source at all.
+func (r *refSourceRoots) root(refVar string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	root, ok := r.roots[refVar]
+	return root, ok
+}
+
+// resolvedRevisions returns the resolved revision per referenced repository. Safe on nil.
+func (r *refSourceRoots) resolvedRevisions() cache.ResolvedRevisions {
+	if r == nil {
+		return nil
+	}
+	return r.revisions
+}
+
+// paths returns the root directories, for redacting them from user-facing output. Safe on nil.
+func (r *refSourceRoots) paths() []string {
+	if r == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(r.roots))
+	paths := make([]string, 0, len(r.roots))
+	for _, root := range r.roots {
+		if _, dup := seen[root]; root == "" || dup {
+			continue
+		}
+		seen[root] = struct{}{}
+		paths = append(paths, root)
+	}
+	return paths
+}
+
+func (r *refSourceRoots) Close() error {
+	if r == nil || r.closer == nil {
+		return nil
+	}
+	return r.closer.Close()
+}
+
+// valueFileResolver resolves Helm value file entries to local paths or remote URLs.
 type valueFileResolver struct {
 	appPath                  string
 	repoRoot                 string
 	env                      *v1alpha1.Env
 	allowedValueFilesSchemas []string
-	refSources               map[string]*v1alpha1.RefTarget
-	gitRepoPaths             utilio.TempPaths
-	ociPaths                 utilio.TempPaths
+	refs                     *refSourceRoots
 	ignoreMissingValueFiles  bool
 }
 
-// newValueFileResolver creates a new instance of valueFileResolver
-func newValueFileResolver(
-	appPath string,
-	repoRoot string,
-	env *v1alpha1.Env,
-	allowedValueFilesSchemas []string,
-	refSources map[string]*v1alpha1.RefTarget,
-	gitRepoPaths utilio.TempPaths,
-	ociPaths utilio.TempPaths,
-	ignoreMissingValueFiles bool,
-) *valueFileResolver {
+func newValueFileResolver(appPath, repoRoot string, env *v1alpha1.Env, allowedValueFilesSchemas []string, refs *refSourceRoots, ignoreMissingValueFiles bool) *valueFileResolver {
 	return &valueFileResolver{
 		appPath:                  appPath,
 		repoRoot:                 repoRoot,
 		env:                      env,
 		allowedValueFilesSchemas: allowedValueFilesSchemas,
-		refSources:               refSources,
-		gitRepoPaths:             gitRepoPaths,
-		ociPaths:                 ociPaths,
+		refs:                     refs,
 		ignoreMissingValueFiles:  ignoreMissingValueFiles,
 	}
 }
 
+// getResolvedValueFiles resolves a list of raw value file paths (handling local files, $ref
+// sources, and glob expansion) via the valueFileResolver.
+func getResolvedValueFiles(appPath, repoRoot string, env *v1alpha1.Env, allowedValueFilesSchemas []string, rawValueFiles []string, refs *refSourceRoots, ignoreMissingValueFiles bool) ([]pathutil.ResolvedFilePath, error) {
+	return newValueFileResolver(appPath, repoRoot, env, allowedValueFilesSchemas, refs, ignoreMissingValueFiles).ResolveValueFiles(rawValueFiles)
+}
+
 // ResolveValueFiles resolves a list of raw value file paths to their resolved paths,
-// handling local files, $ref Git/OCI sources, and glob expansion.
+// handling local files, $ref sources, and glob expansion.
 func (r *valueFileResolver) ResolveValueFiles(rawValueFiles []string) ([]pathutil.ResolvedFilePath, error) {
 	// Pre-collect resolved paths for all explicit (non-glob) entries. This allows glob
 	// expansion to skip files that also appear explicitly, so the explicit entry controls
@@ -127,48 +174,33 @@ func (r *valueFileResolver) ResolveValueFiles(rawValueFiles []string) ([]pathuti
 	return resolvedValueFiles, nil
 }
 
+// ResolveFile resolves a single file entry (e.g. a Helm file parameter) to a local path or remote
+// URL, without glob expansion or an existence check.
+func (r *valueFileResolver) ResolveFile(rawValueFile string) (pathutil.ResolvedFilePath, error) {
+	resolved, err := r.resolveRawPath(rawValueFile)
+	if err != nil {
+		return "", err
+	}
+	return resolved.Path, nil
+}
+
 type resolveRawPathResult struct {
 	Path          pathutil.ResolvedFilePath
 	IsRemote      bool
 	EffectiveRoot string
 }
 
-// resolveRawPath resolves a single raw value file entry to its path without expanding
-// globs or checking for existence. It returns whether the path is a remote URL and the
-// effective repository root used for the glob symlink-boundary check (the external repo's
-// checkout directory for $ref Git sources, otherwise the main repo root).
+// resolveRawPath resolves a single value file entry without expanding globs or checking for
+// existence. It reports whether the path is a remote URL and the root used for the glob
+// symlink-boundary check: the referenced source's directory for "$ref/..." entries, otherwise
+// the main repo root.
 func (r *valueFileResolver) resolveRawPath(rawValueFile string) (*resolveRawPathResult, error) {
-	referencedSource := getReferencedSource(rawValueFile, r.refSources)
-	effectiveRoot := r.repoRoot
-
-	if referencedSource != nil {
-		// If the $-prefixed path appears to reference another source, do env substitution _after_ resolving that source.
-		resolvedPath, err := getResolvedRefValueFile(
-			rawValueFile,
-			r.env,
-			r.allowedValueFilesSchemas,
-			referencedSource.Repo.Repo,
-			r.gitRepoPaths,
-			r.ociPaths,
-		)
+	if root, isRef := r.refs.root(getReferencedSourceName(rawValueFile)); isRef {
+		resolvedPath, err := resolveRefValueFile(rawValueFile, r.env, r.allowedValueFilesSchemas, root)
 		if err != nil {
 			return nil, err
 		}
-		// Set the effective root to the referenced source's extracted directory so the
-		// glob symlink-boundary check resolves matches against the correct root. OCI refs
-		// live under ociPaths (keyed by the normalized OCI URL); Git refs under gitRepoPaths.
-		if referencedSource.Repo.IsOCI() {
-			if ociPath := r.ociPaths.GetPathIfExists(v1alpha1.NormalizeOCIURL(referencedSource.Repo.Repo)); ociPath != "" {
-				effectiveRoot = ociPath
-			}
-		} else if refRepoPath := r.gitRepoPaths.GetPathIfExists(git.NormalizeGitURL(referencedSource.Repo.Repo)); refRepoPath != "" {
-			effectiveRoot = refRepoPath
-		}
-		return &resolveRawPathResult{
-			Path:          resolvedPath,
-			IsRemote:      false,
-			EffectiveRoot: effectiveRoot,
-		}, nil
+		return &resolveRawPathResult{Path: resolvedPath, EffectiveRoot: root}, nil
 	}
 
 	// This will resolve val to an absolute path (or a URL)
@@ -182,11 +214,7 @@ func (r *valueFileResolver) resolveRawPath(rawValueFile string) (*resolveRawPath
 		return nil, err
 	}
 
-	return &resolveRawPathResult{
-		Path:          resolvedPath,
-		IsRemote:      isRemote,
-		EffectiveRoot: effectiveRoot,
-	}, nil
+	return &resolveRawPathResult{Path: resolvedPath, IsRemote: isRemote, EffectiveRoot: r.repoRoot}, nil
 }
 
 // checkFileExists checks if a file exists and determines if it should be skipped
@@ -201,77 +229,86 @@ func (r *valueFileResolver) checkFileExists(resolvedPath pathutil.ResolvedFilePa
 	return false
 }
 
-func getResolvedRefValueFile(
-	rawValueFile string,
-	env *v1alpha1.Env,
-	allowedValueFilesSchemas []string,
-	refSourceRepo string,
-	gitRepoPaths utilio.TempPaths,
-	ociPaths utilio.TempPaths,
-) (pathutil.ResolvedFilePath, error) {
-	pathStrings := strings.Split(rawValueFile, "/")
-
-	// Check if the reference source is an OCI repository
-	if v1alpha1.IsOCIURL(refSourceRepo) {
-		return getResolvedOCIRefValueFile(rawValueFile, env, allowedValueFilesSchemas, refSourceRepo, ociPaths)
+// getReferencedSourceName returns the "$ref" variable a value file entry starts with, or "".
+func getReferencedSourceName(rawValueFile string) string {
+	if !strings.HasPrefix(rawValueFile, "$") {
+		return ""
 	}
+	refName, _, _ := strings.Cut(rawValueFile, "/")
+	return refName
+}
 
-	// Original Git repository handling
-	repoPath := gitRepoPaths.GetPathIfExists(git.NormalizeGitURL(refSourceRepo))
-	if repoPath == "" {
-		return "", fmt.Errorf("failed to find repo %q", refSourceRepo)
+// refSourceCandidates returns the Helm value files and file parameters that may reference another
+// source ("$ref/...").
+func refSourceCandidates(helm *v1alpha1.ApplicationSourceHelm) []string {
+	if helm == nil {
+		return nil
 	}
-	pathStrings[0] = "" // Remove first segment. It will be inserted by pathutil.ResolveValueFilePathOrUrl.
-	substitutedPath := strings.Join(pathStrings, "/")
+	candidates := append([]string{}, helm.ValueFiles...)
+	for _, fileParam := range helm.FileParameters {
+		candidates = append(candidates, fileParam.Path)
+	}
+	return candidates
+}
 
-	// Resolve the path relative to the referenced repo and block any attempt at traversal.
-	resolvedPath, _, err := pathutil.ResolveValueFilePathOrUrl(repoPath, repoPath, env.Envsubst(substitutedPath), allowedValueFilesSchemas)
+// resolveRefValueFile resolves a "$ref/path" value file against root, the materialized directory
+// of the referenced source. An empty root means the source is known but was not materialized.
+func resolveRefValueFile(rawValueFile string, env *v1alpha1.Env, allowedValueFilesSchemas []string, root string) (pathutil.ResolvedFilePath, error) {
+	refVar, refPath, _ := strings.Cut(rawValueFile, "/")
+	if root == "" {
+		return "", fmt.Errorf("source %q referenced by %q was not resolved", refVar, rawValueFile)
+	}
+	// Keep the leading slash: pathutil resolves an absolute value file against root, which also
+	// stops the remainder (e.g. "$ref/https://…") from being treated as a remote URL. What remains
+	// must be a real file path.
+	if strings.Trim(refPath, "/") == "" {
+		return "", fmt.Errorf("invalid value file path %q: no file path after the ref name", rawValueFile)
+	}
+	resolvedPath, _, err := pathutil.ResolveValueFilePathOrUrl(root, root, env.Envsubst("/"+refPath), allowedValueFilesSchemas)
 	if err != nil {
 		return "", fmt.Errorf("error resolving value file path: %w", err)
 	}
 	return resolvedPath, nil
 }
 
-// getResolvedOCIRefValueFile handles OCI ref values by using the already extracted OCI content
-func getResolvedOCIRefValueFile(
-	rawValueFile string,
-	env *v1alpha1.Env,
-	allowedValueFilesSchemas []string,
-	refSourceRepo string,
-	ociPaths utilio.TempPaths,
-) (pathutil.ResolvedFilePath, error) {
-	// Get the OCI path from the ociPaths. Paths are keyed by the normalized repo URL,
-	// matching the key used when the extracted content was registered.
-	normalizedKey := v1alpha1.NormalizeOCIURL(refSourceRepo)
-	ociPath := ociPaths.GetPathIfExists(normalizedKey)
-	if ociPath == "" {
-		// Log only the registered keys (repo URLs), not GetPaths(), which would leak the
-		// randomized temp extraction directories into logs. The keys are enough to spot a
-		// URL mismatch when debugging.
-		registered := make([]string, 0, len(ociPaths.GetPaths()))
-		for key := range ociPaths.GetPaths() {
-			registered = append(registered, key)
-		}
-		sort.Strings(registered)
-		log.Debugf("OCI ref source %q (lookup key %q) not found among registered OCI sources %v", refSourceRepo, normalizedKey, registered)
-		return "", fmt.Errorf("OCI ref source %q was not successfully extracted. Ensure the repository is accessible and properly configured", refSourceRepo)
-	}
+// GlobNoMatchError is returned when a glob pattern in valueFiles matches no files.
+// It is a runtime condition (the files may be added later), not a spec error.
+type GlobNoMatchError struct {
+	Pattern string
+}
 
-	// Remove the first segment (the ref variable name); pathutil re-inserts the OCI root.
-	pathStrings := strings.Split(rawValueFile, "/")
-	pathStrings[0] = ""
-	// Trim the leading slash (OCI paths are relative to the archive root). What remains must
-	// be a real file path - reject inputs like "$oci" or "$oci/" that have no path segment.
-	substitutedPath := strings.TrimPrefix(strings.Join(pathStrings, "/"), "/")
-	if strings.Trim(substitutedPath, "/") == "" {
-		return "", fmt.Errorf("invalid OCI value file path %q: no file path after the ref name", rawValueFile)
-	}
+func (e *GlobNoMatchError) Error() string {
+	return fmt.Sprintf("values file glob %q matched no files", e.Pattern)
+}
 
-	// Resolve the path relative to the extracted OCI content
-	resolvedPath, _, err := pathutil.ResolveValueFilePathOrUrl(ociPath, ociPath, env.Envsubst(substitutedPath), allowedValueFilesSchemas)
+// isGlobPath reports whether path contains any glob metacharacters
+// supported by doublestar: *, ?, or [. The ** pattern is covered by *.
+func isGlobPath(path string) bool {
+	return strings.ContainsAny(path, "*?[")
+}
+
+// verifyGlobMatchesWithinRoot verifies that every glob match, after following symlinks, stays
+// inside effectiveRoot. doublestar.FilepathGlob uses os.Lstat, so it returns the symlink itself
+// (inside the repo) rather than its target; Helm would still follow the link, so an escaping
+// target must be caught here. os.Root performs that check in the kernel: any path component or
+// symlink target that leaves the root fails the Stat.
+func verifyGlobMatchesWithinRoot(matches []string, effectiveRoot string) error {
+	if len(matches) == 0 {
+		return nil
+	}
+	root, err := os.OpenRoot(effectiveRoot)
 	if err != nil {
-		return "", fmt.Errorf("error resolving OCI value file path: %w", err)
+		return fmt.Errorf("error opening repo root: %w", err)
 	}
-
-	return resolvedPath, nil
+	defer root.Close()
+	for _, match := range matches {
+		rel, err := filepath.Rel(effectiveRoot, match)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("glob match %q resolved to outside repository root", match)
+		}
+		if _, err := root.Stat(rel); err != nil {
+			return fmt.Errorf("glob match %q resolved to outside repository root: %w", match, err)
+		}
+	}
+	return nil
 }
