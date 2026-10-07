@@ -958,13 +958,8 @@ func (m *nativeGitClient) Checkout(ctx context.Context, revision string, submodu
 	if revision == "" || revision == "HEAD" {
 		revision = "origin/HEAD"
 	}
-	var out string
-	var err error
-	if m.isPartialClone() {
-		out, err = m.runCredentialedCmdWithOutput(ctx, "checkout", "--force", revision)
-	} else {
-		out, err = m.runCmd(ctx, "checkout", "--force", revision)
-	}
+
+	out, err := m.runCmdMaybeCredentialedForPartialClone(ctx, "checkout", "--force", revision)
 	if err != nil {
 		return out, fmt.Errorf("failed to checkout %s: %w", revision, err)
 	}
