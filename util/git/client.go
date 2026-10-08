@@ -958,13 +958,8 @@ func (m *nativeGitClient) Checkout(ctx context.Context, revision string, submodu
 	if revision == "" || revision == "HEAD" {
 		revision = "origin/HEAD"
 	}
-	var out string
-	var err error
-	if m.isPartialClone() {
-		out, err = m.runCredentialedCmdWithOutput(ctx, "checkout", "--force", revision)
-	} else {
-		out, err = m.runCmd(ctx, "checkout", "--force", revision)
-	}
+
+	out, err := m.runCmdMaybeCredentialedForPartialClone(ctx, "checkout", "--force", revision)
 	if err != nil {
 		return out, fmt.Errorf("failed to checkout %s: %w", revision, err)
 	}
@@ -1209,10 +1204,11 @@ func (m *nativeGitClient) CommitSHA(ctx context.Context) (string, error) {
 
 // RevisionMetadata returns the meta-data for the commit
 func (m *nativeGitClient) RevisionMetadata(ctx context.Context, revision string) (*RevisionMetadata, error) {
-	out, err := m.runCmd(ctx, "show", "-s", "--format=%an <%ae>%n%at%n%B", revision)
+	out, err := m.runCmdMaybeCredentialedForPartialClone(ctx, "show", "-s", "--format=%an <%ae>%n%at%n%B", revision)
 	if err != nil {
 		return nil, err
 	}
+
 	segments := strings.SplitN(out, "\n", 3)
 	if len(segments) != 3 {
 		return nil, fmt.Errorf("expected 3 segments, got %v", segments)
@@ -1229,7 +1225,7 @@ func (m *nativeGitClient) RevisionMetadata(ctx context.Context, revision string)
 	}
 	relatedCommits, _ := GetReferences(log.WithFields(log.Fields{"repo": m.repoURL, "revision": revision}), out)
 
-	out, err = m.runCmd(ctx, "tag", "--points-at", revision)
+	out, err = m.runCmdMaybeCredentialedForPartialClone(ctx, "tag", "--points-at", revision)
 	if err != nil {
 		return nil, err
 	}
@@ -1242,6 +1238,13 @@ func (m *nativeGitClient) RevisionMetadata(ctx context.Context, revision string)
 		Message:    message,
 		References: relatedCommits,
 	}, nil
+}
+
+func (m *nativeGitClient) runCmdMaybeCredentialedForPartialClone(ctx context.Context, args ...string) (string, error) {
+	if m.isPartialClone() {
+		return m.runCredentialedCmdWithOutput(ctx, args...)
+	}
+	return m.runCmd(ctx, args...)
 }
 
 func truncate(str string) string {
