@@ -11,13 +11,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/util/openapi"
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
+	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 )
 
 type KubectlOutput struct {
@@ -35,7 +35,7 @@ type MockKubectlCmd struct {
 	convertToVersionFunc           *func(obj *unstructured.Unstructured, group, version string) (*unstructured.Unstructured, error)
 	getAPIResourcesFunc            *func(config *rest.Config, preferred bool, resourceFilter kube.ResourceFilter) ([]kube.APIResourceInfo, error)
 	getResourceFunc                *func(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string) (*unstructured.Unstructured, error)
-	loadOpenAPISchemaFunc          *func(config *rest.Config) (openapi.Resources, *managedfields.GvkParser, error)
+	loadOpenAPISchemaFunc          *func(config *rest.Config) (openapi.Resources, scheme.GVKParser, error)
 	manageServerSideDiffDryRunFunc *func(config *rest.Config) (diff.KubeApplier, func(), error)
 }
 
@@ -58,7 +58,7 @@ func (k *MockKubectlCmd) WithGetResourceFunc(getResourcefunc func(context.Contex
 }
 
 // WithLoadOpenAPISchemaFunc overrides the default LoadOpenAPISchema behavior.
-func (k *MockKubectlCmd) WithLoadOpenAPISchemaFunc(loadOpenAPISchemaFunc func(*rest.Config) (openapi.Resources, *managedfields.GvkParser, error)) *MockKubectlCmd {
+func (k *MockKubectlCmd) WithLoadOpenAPISchemaFunc(loadOpenAPISchemaFunc func(*rest.Config) (openapi.Resources, scheme.GVKParser, error)) *MockKubectlCmd {
 	k.loadOpenAPISchemaFunc = &loadOpenAPISchemaFunc
 	return k
 }
@@ -117,11 +117,17 @@ func (k *MockKubectlCmd) GetServerVersion(_ *rest.Config) (string, error) {
 	return k.Version, nil
 }
 
-func (k *MockKubectlCmd) LoadOpenAPISchema(config *rest.Config) (openapi.Resources, *managedfields.GvkParser, error) {
+func (k *MockKubectlCmd) LoadOpenAPISchema(config *rest.Config) (openapi.Resources, scheme.GVKParser, error) {
 	if k.loadOpenAPISchemaFunc != nil {
 		return (*k.loadOpenAPISchemaFunc)(config)
 	}
 	return nil, nil, nil
+}
+
+// LoadOpenAPISchemaLazy shares the LoadOpenAPISchema override so a stubbed
+// schema covers both cache engines.
+func (k *MockKubectlCmd) LoadOpenAPISchemaLazy(config *rest.Config) (openapi.Resources, scheme.GVKParser, error) {
+	return k.LoadOpenAPISchema(config)
 }
 
 func (k *MockKubectlCmd) SetOnKubectlRun(_ kube.OnKubectlRunFunc) {

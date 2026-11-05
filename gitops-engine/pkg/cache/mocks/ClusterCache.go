@@ -7,10 +7,10 @@ package mocks
 import (
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/cache"
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
+	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 	mock "github.com/stretchr/testify/mock"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/kubectl/pkg/util/openapi"
 )
 
@@ -257,19 +257,19 @@ func (_c *ClusterCache_GetClusterInfo_Call) RunAndReturn(run func() cache.Cluste
 }
 
 // GetGVKParser provides a mock function for the type ClusterCache
-func (_mock *ClusterCache) GetGVKParser() *managedfields.GvkParser {
+func (_mock *ClusterCache) GetGVKParser() scheme.GVKParser {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetGVKParser")
 	}
 
-	var r0 *managedfields.GvkParser
-	if returnFunc, ok := ret.Get(0).(func() *managedfields.GvkParser); ok {
+	var r0 scheme.GVKParser
+	if returnFunc, ok := ret.Get(0).(func() scheme.GVKParser); ok {
 		r0 = returnFunc()
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(*managedfields.GvkParser)
+			r0 = ret.Get(0).(scheme.GVKParser)
 		}
 	}
 	return r0
@@ -292,12 +292,12 @@ func (_c *ClusterCache_GetGVKParser_Call) Run(run func()) *ClusterCache_GetGVKPa
 	return _c
 }
 
-func (_c *ClusterCache_GetGVKParser_Call) Return(gvkParser *managedfields.GvkParser) *ClusterCache_GetGVKParser_Call {
-	_c.Call.Return(gvkParser)
+func (_c *ClusterCache_GetGVKParser_Call) Return(gVKParser scheme.GVKParser) *ClusterCache_GetGVKParser_Call {
+	_c.Call.Return(gVKParser)
 	return _c
 }
 
-func (_c *ClusterCache_GetGVKParser_Call) RunAndReturn(run func() *managedfields.GvkParser) *ClusterCache_GetGVKParser_Call {
+func (_c *ClusterCache_GetGVKParser_Call) RunAndReturn(run func() scheme.GVKParser) *ClusterCache_GetGVKParser_Call {
 	_c.Call.Return(run)
 	return _c
 }

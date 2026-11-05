@@ -2,6 +2,9 @@ package cache
 
 import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/kubectl/pkg/util/openapi"
+
+	kubescheme "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 )
 
 // syncEngine is how a cluster cache loads and watches resources. Shared state
@@ -36,6 +39,9 @@ type syncEngine interface {
 	// Invalidate needn't know what the engine keeps. Invalidate calls it under
 	// c.lock, before applying its opts.
 	onInvalidate()
+	// loadOpenAPISchema loads the schema this engine serves: legacy parses the
+	// whole v2 document eagerly, informer loads v3 per GroupVersion on demand.
+	loadOpenAPISchema() (openapi.Resources, kubescheme.GVKParser, error)
 }
 
 // stopWatching isn't on syncEngine: only the engine calls it, and what it tears

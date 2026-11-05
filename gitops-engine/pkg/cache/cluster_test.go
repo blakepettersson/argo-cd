@@ -40,6 +40,7 @@ import (
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/kubetest"
+	kubescheme "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 )
 
 func init() {
@@ -2210,8 +2211,8 @@ func TestDiscoveryGetters_ConcurrentWithResync(t *testing.T) {
 	for name, get := range getters {
 		t.Run(name, func(t *testing.T) {
 			cluster := newCluster(t, testPod1())
-			cluster.kubectl.(*kubetest.MockKubectlCmd).WithLoadOpenAPISchemaFunc(func(*rest.Config) (openapi.Resources, *managedfields.GvkParser, error) {
-				return nil, &managedfields.GvkParser{}, nil
+			cluster.kubectl.(*kubetest.MockKubectlCmd).WithLoadOpenAPISchemaFunc(func(*rest.Config) (openapi.Resources, kubescheme.GVKParser, error) {
+				return nil, kubescheme.EagerGVKParser{Parser: &managedfields.GvkParser{}}, nil
 			})
 			require.NoError(t, cluster.EnsureSynced())
 
@@ -2229,7 +2230,7 @@ func TestDiscoveryGetters_ConcurrentWithResync(t *testing.T) {
 			})
 			cluster.Invalidate()
 			require.NoError(t, cluster.EnsureSynced())
-			require.NoError(t, runSynced(&cluster.lock, cluster.reloadOpenAPISchema))
+			require.NoError(t, runSynced(&cluster.lock, func() error { return cluster.reloadOpenAPISchema(cluster.engine) }))
 			// As the CRD watch does.
 			require.NoError(t, runSynced(&cluster.lock, func() error {
 				cluster.appendAPIResource(crdInfo)
@@ -2300,7 +2301,7 @@ func armLockProbe(cluster *clusterCache) *lockProbe {
 		record()
 		return apis, nil
 	})
-	mock.WithLoadOpenAPISchemaFunc(func(*rest.Config) (openapi.Resources, *managedfields.GvkParser, error) {
+	mock.WithLoadOpenAPISchemaFunc(func(*rest.Config) (openapi.Resources, kubescheme.GVKParser, error) {
 		record()
 		return nil, nil, nil
 	})
@@ -3475,6 +3476,44 @@ func TestFindResources_BothEngines(t *testing.T) {
 			assert.Empty(t, cluster.FindResources("other"))
 			pods := cluster.FindResources("default", func(r *Resource) bool { return r.Ref.Kind == "Pod" })
 			assert.Len(t, pods, 1)
+		})
+	}
+}
+
+// lazyRecordingKubectl records which OpenAPI loader the engine picks.
+type lazyRecordingKubectl struct {
+	*kubetest.MockKubectlCmd
+	eager, lazy atomic.Int32
+}
+
+func (k *lazyRecordingKubectl) LoadOpenAPISchema(*rest.Config) (openapi.Resources, kubescheme.GVKParser, error) {
+	k.eager.Add(1)
+	return nil, nil, nil
+}
+
+func (k *lazyRecordingKubectl) LoadOpenAPISchemaLazy(*rest.Config) (openapi.Resources, kubescheme.GVKParser, error) {
+	k.lazy.Add(1)
+	return nil, nil, nil
+}
+
+func TestLoadOpenAPISchema_PerEngine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		mode        Mode
+		eager, lazy int32
+	}{{"legacy", ModeLegacy, 1, 0}, {"informer", ModeInformer, 0, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cluster := newClusterWithOptions(t, []UpdateSettingsFunc{SetMode(tc.mode)}, testPod1())
+			t.Cleanup(func() { cluster.Invalidate() })
+			k := &lazyRecordingKubectl{MockKubectlCmd: cluster.kubectl.(*kubetest.MockKubectlCmd)}
+			cluster.kubectl = k
+			require.NoError(t, cluster.EnsureSynced())
+			// The CRD/APIService reload path follows the engine too.
+			require.NoError(t, runSynced(&cluster.lock, func() error { return cluster.reloadOpenAPISchema(cluster.engine) }))
+			assert.Equal(t, 2*tc.eager, k.eager.Load())
+			assert.Equal(t, 2*tc.lazy, k.lazy.Load())
 		})
 	}
 }

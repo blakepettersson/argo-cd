@@ -19,8 +19,10 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/kubectl/pkg/util/openapi"
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
+	kubescheme "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 )
 
 // informerEngine is the SharedIndexInformer-based cluster cache implementation
@@ -245,14 +247,11 @@ func (e *informerEngine) sync() (err error) {
 	}
 	c.apiResources.Store(&apiResources)
 
-	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(c.config)
+	openAPISchema, gvkParser, err := e.loadOpenAPISchema()
 	if err != nil {
 		return fmt.Errorf("load openapi schema: %w", err)
 	}
-	if gvkParser != nil {
-		c.gvkParser.Store(gvkParser)
-	}
-	c.openAPISchema.Store(&openAPISchema)
+	c.storeOpenAPISchema(openAPISchema, gvkParser)
 
 	// Discovery + informer startup is shared with the CRD-driven path (the
 	// apisMeta reset above makes its skip-already-watched check a no-op, so
@@ -348,6 +347,13 @@ func (e *informerEngine) onInvalidate() {
 // matters. Unlike the legacy path it needs no dynamic client or SSAR
 // clientset here: startInformersForAPILocked builds its own client and RBAC
 // is enforced by the per-informer watch error handler.
+// loadOpenAPISchema fetches only the OpenAPI v3 path list; a GroupVersion's
+// schema is loaded the first time a diff or patch-meta lookup needs it.
+func (e *informerEngine) loadOpenAPISchema() (openapi.Resources, kubescheme.GVKParser, error) {
+	//nolint:wrapcheck // callers wrap
+	return e.c.kubectl.LoadOpenAPISchemaLazy(e.c.config)
+}
+
 func (e *informerEngine) startMissingWatches() error {
 	c := e.c
 	// apisMeta is nil between Invalidate and the next sync, and a CRD or

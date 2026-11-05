@@ -23,6 +23,7 @@ import (
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/diff"
 	utils "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/io"
+	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/tracing"
 )
 
@@ -33,7 +34,11 @@ type OnKubectlRunFunc func(command string) (CleanupFunc, error)
 type Kubectl interface {
 	ManageResources(config *rest.Config) (ResourceOperations, func(), error)
 	ManageServerSideDiffDryRuns(config *rest.Config) (diff.KubeApplier, func(), error)
-	LoadOpenAPISchema(config *rest.Config) (openapi.Resources, *managedfields.GvkParser, error)
+	// LoadOpenAPISchema eagerly fetches and parses the whole OpenAPI v2 document.
+	LoadOpenAPISchema(config *rest.Config) (openapi.Resources, scheme.GVKParser, error)
+	// LoadOpenAPISchemaLazy returns one object serving both results, which
+	// fetches a GroupVersion's OpenAPI v3 schema on first use (#19199).
+	LoadOpenAPISchemaLazy(config *rest.Config) (openapi.Resources, scheme.GVKParser, error)
 	ConvertToVersion(obj *unstructured.Unstructured, group, version string) (*unstructured.Unstructured, error)
 	DeleteResource(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string, deleteOptions metav1.DeleteOptions) error
 	GetResource(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string) (*unstructured.Unstructured, error)
@@ -130,7 +135,7 @@ func isSupportedVerb(apiResource *metav1.APIResource, verb string) bool {
 // - openapi.Resources: used for getting the proto.Schema from a GVK
 // - managedfields.GvkParser: used for building a ParseableType to be used in
 // structured-merge-diffs
-func (k *KubectlCmd) LoadOpenAPISchema(config *rest.Config) (openapi.Resources, *managedfields.GvkParser, error) {
+func (k *KubectlCmd) LoadOpenAPISchema(config *rest.Config) (openapi.Resources, scheme.GVKParser, error) {
 	disco, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create discovery client: %w", err)
@@ -145,7 +150,22 @@ func (k *KubectlCmd) LoadOpenAPISchema(config *rest.Config) (openapi.Resources, 
 	if err != nil {
 		return oapiResources, nil, fmt.Errorf("error getting gvk parser: %w", err)
 	}
-	return oapiResources, gvkParser, nil
+	return oapiResources, scheme.EagerGVKParser{Parser: gvkParser}, nil
+}
+
+// LoadOpenAPISchemaLazy costs one OpenAPI v3 Paths() call up front; schemas
+// are fetched per GroupVersion when first referenced.
+func (k *KubectlCmd) LoadOpenAPISchemaLazy(config *rest.Config) (openapi.Resources, scheme.GVKParser, error) {
+	disco, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create discovery client: %w", err)
+	}
+	paths, err := disco.OpenAPIV3().Paths()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get openapi v3 paths: %w", err)
+	}
+	p := newLazyGVKParser(paths, k.Log)
+	return p, p, nil
 }
 
 func (k *KubectlCmd) newGVKParser(oapiGetter discovery.OpenAPISchemaInterface) (*managedfields.GvkParser, error) {

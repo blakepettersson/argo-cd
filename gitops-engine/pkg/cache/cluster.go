@@ -42,7 +42,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
@@ -54,6 +53,7 @@ import (
 	"k8s.io/kubectl/pkg/util/openapi"
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
+	kubescheme "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/tracing"
 )
 
@@ -158,7 +158,7 @@ type ClusterCache interface {
 	GetOpenAPISchema() openapi.Resources
 	// GetGVKParser returns a parser able to build a TypedValue used in
 	// structured merge diffs.
-	GetGVKParser() *managedfields.GvkParser
+	GetGVKParser() kubescheme.GVKParser
 	// Invalidate cache and executes callback that optionally might update cache settings
 	Invalidate(opts ...UpdateSettingsFunc)
 	// FindResources returns resources that matches given list of predicates from specified namespace or everywhere if specified namespace is empty
@@ -298,7 +298,7 @@ type store struct {
 	eventHandlers               map[uint64]OnEventHandler
 	processEventsHandlers       map[uint64]OnProcessEventsHandler
 	openAPISchema               atomic.Pointer[openapi.Resources]
-	gvkParser                   atomic.Pointer[managedfields.GvkParser]
+	gvkParser                   atomic.Pointer[kubescheme.GVKParser]
 
 	respectRBAC int
 
@@ -450,8 +450,20 @@ func (c *store) GetOpenAPISchema() openapi.Resources {
 
 // GetGVKParser returns a parser able to build a TypedValue used in
 // structured merge diffs.
-func (c *store) GetGVKParser() *managedfields.GvkParser {
-	return c.gvkParser.Load()
+func (c *store) GetGVKParser() kubescheme.GVKParser {
+	if p := c.gvkParser.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// storeOpenAPISchema publishes a freshly loaded schema, keeping the previous
+// parser when the loader returned none.
+func (c *store) storeOpenAPISchema(openAPISchema openapi.Resources, gvkParser kubescheme.GVKParser) {
+	if gvkParser != nil {
+		c.gvkParser.Store(&gvkParser)
+	}
+	c.openAPISchema.Store(&openAPISchema)
 }
 
 // appendAPIResource publishes a copy of apiResources with info added, unless
@@ -837,7 +849,7 @@ func (c *store) handleCRDEvent(engine syncEngine, event watch.EventType, obj *un
 			c.log.Error(err, "Failed to start missing watch")
 		}
 	}
-	if err := runSynced(&c.lock, c.reloadOpenAPISchema); err != nil {
+	if err := runSynced(&c.lock, func() error { return c.reloadOpenAPISchema(engine) }); err != nil {
 		c.log.Error(err, "Failed to reload open api schema")
 	}
 }
@@ -864,15 +876,12 @@ func (c *store) handleAPIServiceEvent(engine syncEngine, event watch.EventType, 
 // called after the set of served APIs changes (e.g. due to a CRD or APIService
 // event) so that field management and schema-aware operations stay in sync with
 // the cluster. Caller must hold c.lock (use runSynced).
-func (c *store) reloadOpenAPISchema() error {
-	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(c.config)
+func (c *store) reloadOpenAPISchema(engine syncEngine) error {
+	openAPISchema, gvkParser, err := engine.loadOpenAPISchema()
 	if err != nil {
 		return fmt.Errorf("failed to load open api schema: %w", err)
 	}
-	if gvkParser != nil {
-		c.gvkParser.Store(gvkParser)
-	}
-	c.openAPISchema.Store(&openAPISchema)
+	c.storeOpenAPISchema(openAPISchema, gvkParser)
 	return nil
 }
 
@@ -892,7 +901,7 @@ func (c *store) reconcileAPIServiceWatches(engine syncEngine, group string, wait
 		if err := runSynced(&c.lock, engine.startMissingWatches); err != nil {
 			c.log.Error(err, "Failed to start missing watches after APIService event")
 		}
-		if err := runSynced(&c.lock, c.reloadOpenAPISchema); err != nil {
+		if err := runSynced(&c.lock, func() error { return c.reloadOpenAPISchema(engine) }); err != nil {
 			c.log.Error(err, "Failed to reload open api schema after APIService event")
 		}
 		return !waitForGroup || group == "" || c.isGroupWatched(group), nil

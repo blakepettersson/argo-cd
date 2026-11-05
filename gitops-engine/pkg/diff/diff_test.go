@@ -29,6 +29,7 @@ import (
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/diff/mocks"
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/diff/testdata"
+	gescheme "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 )
 
 func printDiff(ctx context.Context, result *DiffResult) (string, error) {
@@ -847,7 +848,7 @@ func TestUnsortedEndpoints(t *testing.T) {
 	}
 }
 
-func buildGVKParser(t *testing.T) *managedfields.GvkParser {
+func buildGVKParser(t *testing.T) gescheme.GVKParser {
 	t.Helper()
 	document := &openapi_v2.Document{}
 	require.NoErrorf(t, proto.Unmarshal(testdata.OpenAPIV2Doc, document), "error unmarshaling openapi doc")
@@ -856,7 +857,7 @@ func buildGVKParser(t *testing.T) *managedfields.GvkParser {
 
 	gvkParser, err := managedfields.NewGVKParser(models, false)
 	require.NoErrorf(t, err, "error building gvkParser: %s", err)
-	return gvkParser
+	return gescheme.EagerGVKParser{Parser: gvkParser}
 }
 
 func TestServerSideDiff(t *testing.T) {
@@ -1551,7 +1552,7 @@ const preserveUnknownFieldsWidgetSwagger = `{
   }
 }`
 
-func buildPreserveUnknownFieldsGVKParser(t *testing.T) *managedfields.GvkParser {
+func buildPreserveUnknownFieldsGVKParser(t *testing.T) gescheme.GVKParser {
 	t.Helper()
 	doc, err := openapi_v2.ParseDocument([]byte(preserveUnknownFieldsWidgetSwagger))
 	require.NoError(t, err, "error parsing widget swagger")
@@ -1559,7 +1560,7 @@ func buildPreserveUnknownFieldsGVKParser(t *testing.T) *managedfields.GvkParser 
 	require.NoErrorf(t, err, "error building openapi data: %s", err)
 	gvkParser, err := managedfields.NewGVKParser(models, false)
 	require.NoErrorf(t, err, "error building gvkParser: %s", err)
-	return gvkParser
+	return gescheme.EagerGVKParser{Parser: gvkParser}
 }
 
 // TestServerSideDiffPreservesManagerOwnedFieldUnderWebhookMutation drives the

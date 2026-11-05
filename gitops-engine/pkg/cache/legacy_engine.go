@@ -20,8 +20,10 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/pager"
 	watchutil "k8s.io/client-go/tools/watch"
+	"k8s.io/kubectl/pkg/util/openapi"
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
+	kubescheme "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube/scheme"
 )
 
 // legacyEngine loads each (GroupKind, namespace) with a paged list, then keeps
@@ -127,16 +129,11 @@ func (e *legacyEngine) sync() (err error) {
 	}
 	c.apiResources.Store(&apiResources)
 
-	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(config)
+	openAPISchema, gvkParser, err := e.loadOpenAPISchema()
 	if err != nil {
 		return fmt.Errorf("failed to load open api schema while syncing cluster cache: %w", err)
 	}
-
-	if gvkParser != nil {
-		c.gvkParser.Store(gvkParser)
-	}
-
-	c.openAPISchema.Store(&openAPISchema)
+	c.storeOpenAPISchema(openAPISchema, gvkParser)
 
 	apis, err := c.kubectl.GetAPIResources(c.config, true, c.settings.ResourcesFilter)
 	if err != nil {
@@ -218,6 +215,11 @@ func (e *legacyEngine) sync() (err error) {
 
 // startMissingWatches lists supported cluster resources and starts watching for changes unless watch is already running.
 // Caller must hold c.lock.
+func (e *legacyEngine) loadOpenAPISchema() (openapi.Resources, kubescheme.GVKParser, error) {
+	//nolint:wrapcheck // callers wrap
+	return e.c.kubectl.LoadOpenAPISchema(e.c.config)
+}
+
 func (e *legacyEngine) startMissingWatches() error {
 	c := e.c
 	// apisMeta is nil between Invalidate and the next sync, and a CRD or

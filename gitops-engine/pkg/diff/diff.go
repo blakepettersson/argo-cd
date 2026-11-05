@@ -19,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/jsonmergepatch"
-	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
@@ -223,13 +222,16 @@ func serverSideDiff(ctx context.Context, config, live *unstructured.Unstructured
 // It is then merged with the live state and re-assigned to predictedLive. This means that any
 // fields not managed by the specified manager will be reverted with their state from live, including any webhook mutations.
 // If the given predictedLive does not have the managedFields, an error will be returned.
-func removeWebhookMutation(predictedLive, live *unstructured.Unstructured, gvkParser *managedfields.GvkParser, manager string) (*unstructured.Unstructured, error) {
+func removeWebhookMutation(predictedLive, live *unstructured.Unstructured, gvkParser gescheme.GVKParser, manager string) (*unstructured.Unstructured, error) {
 	plManagedFields := predictedLive.GetManagedFields()
 	if len(plManagedFields) == 0 {
 		return nil, fmt.Errorf("predictedLive for resource %s/%s must have the managedFields", predictedLive.GetKind(), predictedLive.GetName())
 	}
 	gvk := predictedLive.GetObjectKind().GroupVersionKind()
-	pt := gvkParser.Type(gvk)
+	pt, err := gvkParser.Type(gvk)
+	if err != nil {
+		return nil, fmt.Errorf("unable to resolve parseableType for GroupVersionKind %s: %w", gvk, err)
+	}
 	if pt == nil {
 		return nil, fmt.Errorf("unable to resolve parseableType for GroupVersionKind: %s", gvk)
 	}
