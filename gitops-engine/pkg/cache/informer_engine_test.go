@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -94,8 +95,8 @@ func TestBuildInformer_TransformAndEventHandlerInstalled(t *testing.T) {
 
 	cr, ok := obj.(*cachedResource)
 	require.True(t, ok, "stored object must be *cachedResource, got %T", obj)
-	assert.Equal(t, "nginx", cr.GetName())
-	assert.Equal(t, "default", cr.GetNamespace())
+	assert.Equal(t, "nginx", cr.GetObjectMeta().GetName())
+	assert.Equal(t, "default", cr.GetObjectMeta().GetNamespace())
 	require.NotNil(t, cr.Resource)
 	assert.Equal(t, "nginx", cr.Resource.Ref.Name)
 
@@ -2041,20 +2042,24 @@ func samplePod() *unstructured.Unstructured {
 }
 
 func TestTransformForInformer_ProducesCachedResource(t *testing.T) {
-	cache := newTransformTestCache(t)
-	out, err := cache.transformForInformer(samplePod())
+	c := newTransformTestCache(t)
+	out, err := c.transformForInformer(samplePod())
 	require.NoError(t, err)
 
 	cr, ok := out.(*cachedResource)
 	require.True(t, ok, "transform must return *cachedResource")
 
-	// TypeMeta + ObjectMeta populated so the informer's default KeyFunc works.
-	assert.Equal(t, "v1", cr.APIVersion)
-	assert.Equal(t, "Pod", cr.Kind)
-	assert.Equal(t, "nginx", cr.GetName())
-	assert.Equal(t, "default", cr.GetNamespace())
-	assert.Equal(t, "pod-uid", string(cr.GetUID()))
-	assert.Equal(t, "42", cr.GetResourceVersion())
+	// Identity readable through meta.Accessor so the informer's KeyFunc works.
+	assert.Equal(t, schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, cr.GetObjectKind().GroupVersionKind())
+	m, err := meta.Accessor(cr)
+	require.NoError(t, err)
+	assert.Equal(t, "nginx", m.GetName())
+	assert.Equal(t, "default", m.GetNamespace())
+	assert.Equal(t, "pod-uid", string(m.GetUID()))
+	assert.Equal(t, "42", m.GetResourceVersion())
+	key, err := cache.MetaNamespaceKeyFunc(cr)
+	require.NoError(t, err)
+	assert.Equal(t, "default/nginx", key)
 
 	// Domain Resource built via newResource.
 	require.NotNil(t, cr.Resource)
@@ -2234,8 +2239,8 @@ func TestCachedResource_DeepCopyObjectReturnsShellCopy(t *testing.T) {
 
 	require.NotSame(t, orig, copied, "shell must be a new allocation")
 	assert.Same(t, orig.Resource, copied.Resource, "Resource is shared by design — see transform.go")
-	assert.Equal(t, orig.GetName(), copied.GetName())
-	assert.Equal(t, orig.APIVersion, copied.APIVersion)
+	assert.Equal(t, orig.GetObjectMeta(), copied.GetObjectMeta())
+	assert.Equal(t, orig.GetObjectKind(), copied.GetObjectKind())
 }
 
 func TestCachedResource_DeepCopyObjectNilSafe(t *testing.T) {

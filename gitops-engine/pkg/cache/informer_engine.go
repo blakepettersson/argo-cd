@@ -764,7 +764,6 @@ func (e *informerEngine) buildInformer(ctx context.Context, client dynamic.Inter
 			// legacy 10-minute watchResyncTimeout is intentionally dropped
 			// here — see issue #19199.
 			ResyncPeriod:      0,
-			Indexers:          cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 			ObjectDescription: fmt.Sprintf("%s[%s]", api.GroupKind, namespaceDescription(ns)),
 		},
 	)
@@ -907,19 +906,7 @@ func (e *informerEngine) transformForInformer(obj any) (any, error) {
 	if res.Resource == nil && (kube.IsCRD(un) || kube.IsAPIService(un)) {
 		res.Resource = un
 	}
-	return &cachedResource{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: un.GetAPIVersion(),
-			Kind:       un.GetKind(),
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            un.GetName(),
-			Namespace:       un.GetNamespace(),
-			UID:             un.GetUID(),
-			ResourceVersion: un.GetResourceVersion(),
-		},
-		Resource: res,
-	}, nil
+	return &cachedResource{Resource: res}, nil
 }
 
 // dispatchEvent fires OnEvent handlers and, for CRD events, the CRD handler.
@@ -1147,9 +1134,8 @@ func namespaceDescription(ns string) string {
 }
 
 // cachedResource is the type stored in the informer's store by the informer
-// engine (see issue #19199). It pairs the domain Resource (what the rest of
-// the cluster cache wants) with just enough Kubernetes metadata that
-// meta.Accessor / MetaNamespaceKeyFunc can key it for the informer's indexer.
+// engine (see issue #19199). It wraps the domain Resource, which also lives in
+// c.resources, so the informer's store adds only this pointer per object.
 //
 // The full unstructured object is kept on Resource.Resource only when
 // OnPopulateResourceInfoHandler returns cacheManifest=true — the same
@@ -1157,43 +1143,40 @@ func namespaceDescription(ns string) string {
 // to the floor after we've extracted the metadata needed for hierarchy
 // traversal and the user-supplied Info.
 type cachedResource struct {
-	metav1.TypeMeta
-	metav1.ObjectMeta
-	// Resource carries the domain payload (Ref, OwnerRefs, Info, etc.).
-	// Named rather than embedded to avoid promoted-field collisions with
-	// ObjectMeta (both have e.g. a notion of "Name").
 	Resource *Resource
 }
 
-// DeepCopyObject satisfies runtime.Object. The returned shell holds copies
-// of TypeMeta and ObjectMeta but SHARES the Resource pointer with the
-// receiver — by design. The same *Resource lives in the informer's store
-// and in c.resources (the shadow map), and onInformerChange mutates
-// Resource.OwnerRefs under c.lock during inferred parent-ref propagation
-// (updateIndexes). Deep-copying Resource here would not stop that mutation
-// pattern, only hide it from readers. Callers that need an isolated
-// snapshot — including the client-go cache mutation detector — must copy
-// OwnerRefs themselves; the detector is therefore incompatible with this
-// mode and should not be enabled together with ModeInformer.
-//
-// ponytail: the mutation detector (KUBE_CACHE_MUTATION_DETECTOR) cannot see
-// *Resource mutations, because the store mutates owner refs in place on the
-// shared pointer. Deep-copy Resource here only if a consumer needs isolated
-// copies and can afford the per-object memory.
+// GetObjectMeta lets meta.Accessor, and so the informer's key function, read
+// the object's identity. It builds the ObjectMeta per call rather than
+// storing ~230 bytes per object; setters on the result have no effect.
+func (cr *cachedResource) GetObjectMeta() metav1.Object {
+	return &metav1.ObjectMeta{
+		Name:            cr.Resource.Ref.Name,
+		Namespace:       cr.Resource.Ref.Namespace,
+		UID:             cr.Resource.Ref.UID,
+		ResourceVersion: cr.Resource.ResourceVersion,
+	}
+}
+
+// DeepCopyObject satisfies runtime.Object. The copy SHARES the Resource
+// pointer with the receiver — by design. The same *Resource lives in the
+// informer's store and in c.resources (the shadow map), and onInformerChange
+// mutates Resource.OwnerRefs under c.lock during inferred parent-ref
+// propagation (updateIndexes). Deep-copying Resource here would not stop that
+// mutation pattern, only hide it from readers. The client-go cache mutation
+// detector (KUBE_CACHE_MUTATION_DETECTOR) therefore cannot see these
+// mutations and should not be enabled together with ModeInformer.
 func (cr *cachedResource) DeepCopyObject() runtime.Object {
 	if cr == nil {
 		return nil
 	}
-	return &cachedResource{
-		TypeMeta:   cr.TypeMeta,
-		ObjectMeta: *cr.DeepCopy(),
-		Resource:   cr.Resource,
-	}
+	return &cachedResource{Resource: cr.Resource}
 }
 
-// GetObjectKind is part of runtime.Object. It returns the embedded TypeMeta.
+// GetObjectKind is part of runtime.Object. Like GetObjectMeta it is built per
+// call, so SetGroupVersionKind on the result has no effect.
 func (cr *cachedResource) GetObjectKind() schema.ObjectKind {
-	return &cr.TypeMeta
+	return &metav1.TypeMeta{APIVersion: cr.Resource.Ref.APIVersion, Kind: cr.Resource.Ref.Kind}
 }
 
 // unstructuredFromCachedResource synthesizes a minimal *Unstructured from
@@ -1203,11 +1186,12 @@ func (cr *cachedResource) GetObjectKind() schema.ObjectKind {
 // to be cached via the OnPopulateResourceInfoHandler's cacheManifest return.
 func unstructuredFromCachedResource(cr *cachedResource) *unstructured.Unstructured {
 	un := &unstructured.Unstructured{Object: map[string]any{}}
-	un.SetAPIVersion(cr.APIVersion)
-	un.SetKind(cr.Kind)
-	un.SetName(cr.Name)
-	un.SetNamespace(cr.Namespace)
-	un.SetUID(cr.UID)
-	un.SetResourceVersion(cr.ResourceVersion)
+	ref := cr.Resource.Ref
+	un.SetAPIVersion(ref.APIVersion)
+	un.SetKind(ref.Kind)
+	un.SetName(ref.Name)
+	un.SetNamespace(ref.Namespace)
+	un.SetUID(ref.UID)
+	un.SetResourceVersion(cr.Resource.ResourceVersion)
 	return un
 }
