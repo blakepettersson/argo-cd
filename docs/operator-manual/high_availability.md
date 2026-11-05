@@ -258,13 +258,14 @@ stringData:
     * These cluster cache settings are ignored, and the controller logs the ones set to a non-default value on the
       first sync: list page size (`ARGOCD_CLUSTER_CACHE_LIST_PAGE_SIZE`), list page buffer size
       (`ARGOCD_CLUSTER_CACHE_LIST_PAGE_BUFFER_SIZE`), list retry limit (`ARGOCD_CLUSTER_CACHE_ATTEMPT_LIMIT`), list
-      retry backoff (`ARGOCD_CLUSTER_CACHE_RETRY_USE_BACKOFF`), the list retry function, watch resync timeout
-      (`ARGOCD_CLUSTER_CACHE_WATCH_RESYNC_DURATION`), batch events processing
-      (`ARGOCD_CLUSTER_CACHE_BATCH_EVENTS_PROCESSING`) and the events processing interval
-      (`ARGOCD_CLUSTER_CACHE_EVENTS_PROCESSING_INTERVAL`). `ARGOCD_CLUSTER_CACHE_LIST_SEMAPHORE` is honoured for the
+      retry backoff (`ARGOCD_CLUSTER_CACHE_RETRY_USE_BACKOFF`), the list retry function and the watch resync timeout
+      (`ARGOCD_CLUSTER_CACHE_WATCH_RESYNC_DURATION`). `ARGOCD_CLUSTER_CACHE_LIST_SEMAPHORE` is honoured for the
       classic paged list path; when client-go uses WatchList streaming for the initial state, requests bypass it
       (streaming does not produce the page-sized allocation spikes the semaphore exists to bound).
-    * Events are processed one at a time, so each `argocd_resource_events_processing` sample covers a single event.
+    * `ARGOCD_CLUSTER_CACHE_BATCH_EVENTS_PROCESSING` batches watch events as in the legacy engine. Events for the
+      same resource within one `ARGOCD_CLUSTER_CACHE_EVENTS_PROCESSING_INTERVAL` are merged into the latest one, and
+      each `argocd_resource_events_processing` sample covers one batch. The initial list is never batched. Without
+      batching, each sample covers a single event.
 
   > [!WARNING]
   > In informer mode the Kubernetes client-go cache mutation detector (`KUBE_CACHE_MUTATION_DETECTOR`) cannot detect

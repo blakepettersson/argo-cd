@@ -7,6 +7,7 @@ import (
 	"maps"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -75,12 +76,30 @@ type informerEngine struct {
 	// ignoredSettingsLogged is set once logIgnoredSettings has run, so the
 	// line is logged on the first ensureSynced only. Guarded by syncMu.
 	ignoredSettingsLogged bool
+
+	// With batchEventsProcessing, watch events queue in batchPending and a
+	// drainer applies them under one c.lock every eventProcessingInterval.
+	// batching mirrors batchCancel != nil for the lock-free event path.
+	batching     atomic.Bool
+	batchCancel  context.CancelFunc // guarded by store.lock
+	batchMu      sync.Mutex
+	batchPending []pendingEvent
+	// batchLast maps a key to its last pending Added/Modified entry, which a
+	// newer Added/Modified overwrites. Deletes always append, so a delete and
+	// re-create still apply in order.
+	batchLast map[kube.ResourceKey]int
+}
+
+type pendingEvent struct {
+	ctx   context.Context // the informer's; cancelled means stale
+	event watch.EventType
+	cr    *cachedResource
 }
 
 // logIgnoredSettings logs, once, the legacy-only settings that differ from
 // their gitops-engine default. Informer mode does not read them: the
-// reflector does its own paging, retry and resync, and events are processed
-// one at a time. listSemaphore is honoured (see buildInformer) and not listed.
+// reflector does its own paging, retry and resync. listSemaphore and the
+// batching settings are honoured and not listed.
 func (e *informerEngine) logIgnoredSettings() {
 	if e.ignoredSettingsLogged {
 		return
@@ -105,12 +124,6 @@ func (e *informerEngine) logIgnoredSettings() {
 	}
 	if c.watchResyncTimeout != defaultWatchResyncTimeout {
 		ignored = append(ignored, "watchResyncTimeout")
-	}
-	if c.batchEventsProcessing {
-		ignored = append(ignored, "batchEventsProcessing")
-	}
-	if c.eventProcessingInterval != defaultEventProcessingInterval {
-		ignored = append(ignored, "eventProcessingInterval")
 	}
 	if len(ignored) > 0 {
 		c.log.Info("Informer mode ignores these legacy cluster cache settings", "settings", ignored)
@@ -209,6 +222,8 @@ func (e *informerEngine) sync() (err error) {
 	// The previous initial sync timed out with its informers still running:
 	// keep them so in-flight lists keep their progress, start informers for any
 	// newly discovered API, and wait again.
+	e.startBatchingLocked()
+
 	if c.apisMeta != nil && !e.firstSyncCompleted && len(e.informers) > 0 {
 		c.log.Info("Resuming initial informer sync")
 		if err := e.startMissingWatches(); err != nil {
@@ -333,6 +348,99 @@ func (e *informerEngine) onInvalidate() {
 	}
 	e.firstSyncCompleted = false
 	e.informers = map[schema.GroupKind]map[string]sharedInformer{}
+	e.stopBatchingLocked()
+}
+
+// startBatchingLocked starts the batch drainer when batchEventsProcessing is
+// set and none is running. Caller holds store.lock.
+func (e *informerEngine) startBatchingLocked() {
+	c := e.c
+	if !c.batchEventsProcessing || e.batchCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	e.batchCancel = cancel
+	e.batching.Store(true)
+	go e.drainBatches(ctx, c.eventProcessingInterval)
+}
+
+// stopBatchingLocked stops the drainer and drops queued events; their
+// informers are being cancelled too. Caller holds store.lock.
+func (e *informerEngine) stopBatchingLocked() {
+	if e.batchCancel == nil {
+		return
+	}
+	e.batchCancel()
+	e.batchCancel = nil
+	e.batching.Store(false)
+	e.batchMu.Lock()
+	e.batchPending, e.batchLast = nil, nil
+	e.batchMu.Unlock()
+}
+
+func (e *informerEngine) drainBatches(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.flushBatch()
+		}
+	}
+}
+
+func (e *informerEngine) enqueueEvent(ctx context.Context, event watch.EventType, cr *cachedResource) {
+	key := cr.Resource.ResourceKey()
+	e.batchMu.Lock()
+	defer e.batchMu.Unlock()
+	if event != watch.Deleted {
+		if i, ok := e.batchLast[key]; ok {
+			e.batchPending[i] = pendingEvent{ctx: ctx, event: event, cr: cr}
+			return
+		}
+	}
+	e.batchPending = append(e.batchPending, pendingEvent{ctx: ctx, event: event, cr: cr})
+	if e.batchLast == nil {
+		e.batchLast = map[kube.ResourceKey]int{}
+	}
+	if event == watch.Deleted {
+		delete(e.batchLast, key)
+	} else {
+		e.batchLast[key] = len(e.batchPending) - 1
+	}
+}
+
+// flushBatch applies the queued events under one c.lock and reports them as
+// one argocd_resource_events_processing sample.
+func (e *informerEngine) flushBatch() {
+	e.batchMu.Lock()
+	pending := e.batchPending
+	e.batchPending, e.batchLast = nil, nil
+	e.batchMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	c := e.c
+	start := time.Now()
+	applied := 0
+	c.lock.Lock()
+	for _, p := range pending {
+		if p.ctx.Err() != nil {
+			continue
+		}
+		e.applyChangeLocked(p.event, p.cr, false)
+		applied++
+	}
+	c.lock.Unlock()
+	if applied == 0 {
+		return
+	}
+	duration := time.Since(start)
+	for _, h := range c.getProcessEventsHandlers() {
+		h(duration, applied)
+	}
 }
 
 // startMissingWatches discovers the API surface and starts an informer set
@@ -837,11 +945,9 @@ func (e *informerEngine) dispatchEvent(event watch.EventType, un *unstructured.U
 // Add/Update/Delete into onInformerChange, unwrapping tombstones and
 // tolerating unexpected object types defensively.
 //
-// Events are processed one at a time: each takes c.lock for its own storage
-// update (an informer delivers its events serially), and
-// OnProcessEventsHandler, which feeds the argocd_resource_events_processing
-// histogram, observes one event per sample with count=1. The legacy
-// batchEventsProcessing and eventProcessingInterval settings do not apply.
+// Without batchEventsProcessing each event takes c.lock for its own storage
+// update and OnProcessEventsHandler observes count=1. With it, watch events
+// are applied in batches by the drainer (see enqueueEvent).
 //
 // It gates every dispatch on the informer's owning watch context. Once that
 // context is cancelled (Invalidate, stopWatching), in-flight events from the
@@ -927,13 +1033,38 @@ func (e *informerEngine) onInformerChange(ctx context.Context, event watch.Event
 		un = unstructuredFromCachedResource(primary)
 	}
 
+	// Skip storage write + OnResourceUpdated dispatch for Modified events
+	// on resources in ignoredRefreshResources (Endpoints today). Legacy
+	// recordEvent does the same gate — it suppresses processEvent (the only
+	// path that calls OnResourceUpdated under legacy) for high-churn kinds
+	// whose updates are app-irrelevant.
+	// Without this, every leader-election Endpoint rewrite acquires
+	// c.lock (write), walks parentUIDToChildren, and fires every
+	// OnResourceUpdated subscriber — pure overhead even though the
+	// downstream filter in argo-cd then drops the requeue.
+	skipStorageUpdate := event == watch.Modified && skipAppRequeuing(primary.Resource.ResourceKey())
+	if !skipStorageUpdate && event != watch.Deleted && (newCr == nil || newCr.Resource == nil) {
+		c.log.V(1).Info("Informer Add/Modify with missing new object — skipping",
+			"event", event,
+			"newType", fmt.Sprintf("%T", newObj),
+			"oldType", fmt.Sprintf("%T", oldObj))
+		return
+	}
+
+	// Batched watch events: storage waits for the drainer; OnEvent and CRD
+	// routing stay inline, as legacy recordEvent does. Initial-list events
+	// always apply inline so HasSynced still means the cache is populated.
+	if !isInInitialList && e.batching.Load() {
+		if !skipStorageUpdate {
+			e.enqueueEvent(ctx, event, primary)
+		}
+		e.dispatchEvent(event, un)
+		return
+	}
+
 	// Time the under-lock storage + dispatch work so we can feed the
-	// OnProcessEventsHandler observer below. Legacy fires this handler from
-	// legacyEngine.processEventsBatch with a batch duration + count;
-	// informer mode has no batching (events flow inline through the
-	// reflector), so we report per-event duration with count=1. This keeps
-	// the argocd_resource_events_processing histogram alive — without it
-	// the metric flatlines the moment ModeInformer is enabled.
+	// OnProcessEventsHandler observer below with count=1. This keeps the
+	// argocd_resource_events_processing histogram alive when batching is off.
 	processingStart := time.Now()
 
 	// Storage mutations + OnResourceUpdated dispatch run under c.lock so the
@@ -949,54 +1080,8 @@ func (e *informerEngine) onInformerChange(ctx context.Context, event watch.Event
 		c.lock.Unlock()
 		return
 	}
-	// Skip storage write + OnResourceUpdated dispatch for Modified events
-	// on resources in ignoredRefreshResources (Endpoints today). Legacy
-	// recordEvent does the same gate — it suppresses processEvent (the only
-	// path that calls OnResourceUpdated under legacy) for high-churn kinds
-	// whose updates are app-irrelevant.
-	// Without this, every leader-election Endpoint rewrite acquires
-	// c.lock (write), walks parentUIDToChildren, and fires every
-	// OnResourceUpdated subscriber — pure overhead even though the
-	// downstream filter in argo-cd then drops the requeue.
-	skipStorageUpdate := event == watch.Modified && skipAppRequeuing(primary.Resource.ResourceKey())
-	switch {
-	case skipStorageUpdate:
-		// no-op for storage; dispatchEvent below still fires OnEvent.
-	case event == watch.Added || event == watch.Modified:
-		// Maintain c.resources as a shadow of the informer's store so every
-		// existing read path (GetManagedLiveObjs, IterateHierarchyV2's key
-		// lookups, FindResources for the all-namespaces case) works unchanged
-		// under informer mode.
-		if newCr == nil || newCr.Resource == nil {
-			c.lock.Unlock()
-			c.log.V(1).Info("Informer Add/Modify with missing new object — skipping",
-				"event", event,
-				"newType", fmt.Sprintf("%T", newObj),
-				"oldType", fmt.Sprintf("%T", oldObj))
-			return
-		}
-		// Take the previous entry as actually indexed (not the informer's
-		// oldObj) for both index maintenance and dispatch — matching the
-		// legacy processEvent path, and robust to any drift between the
-		// shadow map and the informer's store.
-		existing := c.resources[newCr.Resource.ResourceKey()]
-		c.setNode(newCr.Resource)
-		// Suppress OnResourceUpdated for isInInitialList events during the
-		// very first sync — legacy first-sync writes to c.resources via
-		// setNode without firing OnResourceUpdated. After
-		// firstSyncCompleted flips true, isInInitialList events come from
-		// CRD-driven new-watch initial lists, which legacy DOES dispatch
-		// via replaceResourceCache -> onNodeUpdated. Watch events
-		// (isInInitialList=false) always dispatch.
-		if !isInInitialList || e.firstSyncCompleted {
-			c.dispatchResourceUpdated(newCr.Resource, existing, c.nsIndex[newCr.Resource.Ref.Namespace])
-		}
-	case event == watch.Deleted:
-		// For deletes the informer passes the last-known object as oldObj;
-		// we treated it as `primary` above for dispatchEvent purposes.
-		// onNodeRemoved removes the entry as actually indexed (not the
-		// informer's copy) and dispatches only if it was present.
-		c.onNodeRemoved(primary.Resource.ResourceKey())
+	if !skipStorageUpdate {
+		e.applyChangeLocked(event, primary, isInInitialList)
 	}
 	c.lock.Unlock()
 
@@ -1023,6 +1108,35 @@ func (e *informerEngine) onInformerChange(ctx context.Context, event watch.Event
 	// invokes recordEvent (event handlers) and handleCRDEvent outside the
 	// lock; only processEvent runs under it.
 	e.dispatchEvent(event, un)
+}
+
+// applyChangeLocked writes one event to c.resources and the shared indexes
+// and fires OnResourceUpdated. cr is the new object for Added/Modified and
+// the last-known one for Deleted. Caller holds c.lock.
+func (e *informerEngine) applyChangeLocked(event watch.EventType, cr *cachedResource, isInInitialList bool) {
+	c := e.c
+	if event == watch.Deleted {
+		// onNodeRemoved removes the entry as actually indexed (not the
+		// informer's copy) and dispatches only if it was present.
+		c.onNodeRemoved(cr.Resource.ResourceKey())
+		return
+	}
+	// Take the previous entry as actually indexed (not the informer's
+	// oldObj) for both index maintenance and dispatch — matching the
+	// legacy processEvent path, and robust to any drift between the
+	// shadow map and the informer's store.
+	existing := c.resources[cr.Resource.ResourceKey()]
+	c.setNode(cr.Resource)
+	// Suppress OnResourceUpdated for isInInitialList events during the
+	// very first sync — legacy first-sync writes to c.resources via
+	// setNode without firing OnResourceUpdated. After
+	// firstSyncCompleted flips true, isInInitialList events come from
+	// CRD-driven new-watch initial lists, which legacy DOES dispatch
+	// via replaceResourceCache -> onNodeUpdated. Watch events
+	// (isInInitialList=false) always dispatch.
+	if !isInInitialList || e.firstSyncCompleted {
+		c.dispatchResourceUpdated(cr.Resource, existing, c.nsIndex[cr.Resource.Ref.Namespace])
+	}
 }
 
 func namespaceDescription(ns string) string {

@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2246,4 +2247,144 @@ func TestCachedResource_SatisfiesRuntimeObject(_ *testing.T) {
 	// Compile-time sanity — cachedResource must be a runtime.Object so it
 	// can live in an informer store.
 	var _ runtime.Object = (*cachedResource)(nil)
+}
+
+// newBatchTestCache returns an informer-mode cache with batching on and a
+// drainer whose ticker never fires, so tests flush by hand.
+func newBatchTestCache(t *testing.T) (*clusterCache, *informerEngine) {
+	t.Helper()
+	c := NewClusterCache(&rest.Config{}, SetMode(ModeInformer),
+		SetBatchEventsProcessing(true), SetEventProcessingInterval(time.Hour))
+	e := informerEngineOf(c)
+	require.NoError(t, runSynced(&c.lock, func() error { e.startBatchingLocked(); return nil }))
+	t.Cleanup(func() { c.Invalidate() })
+	return c, e
+}
+
+func batchPod(t *testing.T, c *clusterCache, uid, rv string) *cachedResource {
+	t.Helper()
+	un := samplePod()
+	un.SetUID(types.UID(uid))
+	un.SetResourceVersion(rv)
+	cr, err := c.transformForInformer(un)
+	require.NoError(t, err)
+	return cr.(*cachedResource)
+}
+
+func TestInformerBatch_DefersAndCoalesces(t *testing.T) {
+	t.Parallel()
+	c, e := newBatchTestCache(t)
+	var events, updates int
+	var batches []int
+	c.OnEvent(func(watch.EventType, *unstructured.Unstructured) { events++ })
+	c.OnResourceUpdated(func(_, _ *Resource, _ map[kube.ResourceKey]*Resource) { updates++ })
+	c.processEventsHandlers = map[uint64]OnProcessEventsHandler{1: func(_ time.Duration, n int) { batches = append(batches, n) }}
+
+	h := c.informerEventHandler()
+	v1, v2, v3 := batchPod(t, c, "pod-uid", "1"), batchPod(t, c, "pod-uid", "2"), batchPod(t, c, "pod-uid", "3")
+	h.OnAdd(v1, false)
+	h.OnUpdate(v1, v2)
+	h.OnUpdate(v2, v3)
+
+	assert.Equal(t, 3, events, "OnEvent stays inline")
+	assert.Empty(t, c.resources, "storage waits for the flush")
+
+	e.flushBatch()
+	res := c.resources[v3.Resource.ResourceKey()]
+	require.NotNil(t, res)
+	assert.Equal(t, "3", res.ResourceVersion)
+	assert.Equal(t, 1, updates, "three events for one key coalesce into one update")
+	assert.Equal(t, []int{1}, batches, "one sample per batch")
+
+	e.flushBatch()
+	assert.Equal(t, []int{1}, batches, "an empty flush reports nothing")
+}
+
+func TestInformerBatch_DeleteThenRecreateAppliesInOrder(t *testing.T) {
+	t.Parallel()
+	c, e := newBatchTestCache(t)
+	h := c.informerEventHandler()
+	old := batchPod(t, c, "old-uid", "1")
+	h.OnAdd(old, false)
+	e.flushBatch()
+
+	var updates []string
+	c.OnResourceUpdated(func(newRes, oldRes *Resource, _ map[kube.ResourceKey]*Resource) {
+		if newRes == nil {
+			updates = append(updates, "delete "+string(oldRes.Ref.UID))
+			return
+		}
+		updates = append(updates, "upsert "+string(newRes.Ref.UID))
+	})
+	recreated := batchPod(t, c, "new-uid", "2")
+	h.OnDelete(old)
+	h.OnAdd(recreated, false)
+	e.flushBatch()
+
+	assert.Equal(t, []string{"delete old-uid", "upsert new-uid"}, updates)
+	assert.Equal(t, types.UID("new-uid"), c.resources[recreated.Resource.ResourceKey()].Ref.UID)
+}
+
+func TestInformerBatch_DropsStaleEvents(t *testing.T) {
+	t.Parallel()
+	c, e := newBatchTestCache(t)
+	var batches int
+	c.processEventsHandlers = map[uint64]OnProcessEventsHandler{1: func(time.Duration, int) { batches++ }}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.informerEventHandlerForCtx(ctx).OnAdd(batchPod(t, c, "pod-uid", "1"), false)
+	cancel()
+
+	e.flushBatch()
+	assert.Empty(t, c.resources, "events from a cancelled informer are dropped")
+	assert.Zero(t, batches)
+}
+
+func TestInformerBatch_InitialListAppliesInline(t *testing.T) {
+	t.Parallel()
+	c, _ := newBatchTestCache(t)
+	cr := batchPod(t, c, "pod-uid", "1")
+	c.informerEventHandler().OnAdd(cr, true)
+	assert.NotNil(t, c.resources[cr.Resource.ResourceKey()], "HasSynced must imply the cache is populated")
+}
+
+func TestInformerBatch_InvalidateStopsDrainer(t *testing.T) {
+	t.Parallel()
+	c, e := newBatchTestCache(t)
+	c.informerEventHandler().OnAdd(batchPod(t, c, "pod-uid", "1"), false)
+	require.Len(t, e.batchPending, 1)
+
+	c.Invalidate()
+	assert.False(t, e.batching.Load())
+	assert.Nil(t, e.batchCancel)
+	assert.Empty(t, e.batchPending, "queued events belong to cancelled informers")
+}
+
+// TestInformerBatch_EndToEnd runs real informers and the drainer's ticker.
+func TestInformerBatch_EndToEnd(t *testing.T) {
+	t.Parallel()
+	var batched atomic.Int32
+	cluster := newClusterWithOptions(t, []UpdateSettingsFunc{
+		SetMode(ModeInformer),
+		SetBatchEventsProcessing(true),
+		SetEventProcessingInterval(10 * time.Millisecond),
+	}, testPod1())
+	t.Cleanup(func() { cluster.Invalidate() })
+	cluster.OnProcessEventsHandler(func(_ time.Duration, n int) { batched.Add(int32(n)) })
+	require.NoError(t, cluster.EnsureSynced())
+	// Initial-list events report inline, one per event.
+	baseline := batched.Load()
+
+	client := cluster.kubectl.(*kubetest.MockKubectlCmd).DynamicClient
+	pod := mustToUnstructured(testPod2())
+	_, err := client.Resource(podsGVR).Namespace(pod.GetNamespace()).Create(t.Context(), pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	key := kube.GetResourceKey(pod)
+	require.Eventually(t, func() bool {
+		cluster.lock.RLock()
+		defer cluster.lock.RUnlock()
+		return cluster.resources[key] != nil
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return batched.Load() > baseline }, 5*time.Second, 10*time.Millisecond,
+		"the drainer reports the batch")
 }

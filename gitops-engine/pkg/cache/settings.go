@@ -231,9 +231,9 @@ const (
 	// https://github.com/argoproj/argo-cd/issues/19199.
 	//
 	// ModeInformer ignores listPageSize, listPageBufferSize, listRetryLimit,
-	// listRetryUseBackoff, listRetryFunc, watchResyncTimeout,
-	// batchEventsProcessing and eventProcessingInterval, and logs the ones set
-	// to a non-default value on the first sync. listSemaphore is honoured.
+	// listRetryUseBackoff, listRetryFunc and watchResyncTimeout, and logs the
+	// ones set to a non-default value on the first sync. listSemaphore,
+	// batchEventsProcessing and eventProcessingInterval are honoured.
 	ModeInformer
 )
 
