@@ -3491,7 +3491,7 @@ func (k *lazyRecordingKubectl) LoadOpenAPISchema(*rest.Config) (openapi.Resource
 	return nil, nil, nil
 }
 
-func (k *lazyRecordingKubectl) LoadOpenAPISchemaLazy(*rest.Config) (openapi.Resources, kubescheme.GVKParser, error) {
+func (k *lazyRecordingKubectl) LoadOpenAPISchemaLazy(*rest.Config, kubescheme.GVKParser) (openapi.Resources, kubescheme.GVKParser, error) {
 	k.lazy.Add(1)
 	return nil, nil, nil
 }

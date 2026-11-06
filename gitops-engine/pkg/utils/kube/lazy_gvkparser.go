@@ -26,7 +26,8 @@ var (
 // the parser and the error are cached so a persistently failing GroupVersion
 // (e.g. a bad CRD or a conversion webhook that is down) is not re-fetched on
 // every Type() call — it fails fast from cache until the next reload rebuilds
-// the parser with fresh paths.
+// the parser with fresh paths. A reload carries over successful results whose
+// ServerRelativeURL (it includes ?hash=) is unchanged.
 //
 // Type and LookupResource cache separately: the proto models LookupResource
 // needs are ~2x the parser's size and only RespectIgnoreDifferences on CRDs
@@ -36,6 +37,9 @@ type gvResult struct {
 	models proto.Models                       // LookupResource
 	kinds  map[schema.GroupVersionKind]string // LookupResource: GVK -> model name
 	err    error
+	// path and url (ServerRelativeURL, includes ?hash=) let a reload decide
+	// whether the result is still current.
+	path, url string
 }
 
 const (
@@ -69,11 +73,24 @@ type lazyGVKParser struct {
 
 // newLazyGVKParser creates a lazy parser from the already-fetched GroupVersion
 // paths. The paths map comes from a single cheap OpenAPIV3().Paths() call.
-func newLazyGVKParser(paths map[string]openapiclient.GroupVersion, log logr.Logger) *lazyGVKParser {
-	return &lazyGVKParser{
+// Successful results from prev (may be nil) whose GroupVersion hash is
+// unchanged are reused, so a CRD event doesn't drop every loaded schema.
+func newLazyGVKParser(paths map[string]openapiclient.GroupVersion, log logr.Logger, prev *lazyGVKParser) *lazyGVKParser {
+	p := &lazyGVKParser{
 		paths: paths,
 		log:   log,
 	}
+	if prev == nil {
+		return p
+	}
+	prev.parsers.Range(func(k, v any) bool {
+		r := v.(*gvResult)
+		if gv, ok := paths[r.path]; ok && r.err == nil && r.url != "" && gv.ServerRelativeURL() == r.url {
+			p.parsers.Store(k, r)
+		}
+		return true
+	})
+	return p
 }
 
 // Type resolves a GVK to its ParseableType, lazily loading the schema for the
@@ -132,6 +149,7 @@ func (p *lazyGVKParser) load(kind, path string) *gvResult {
 			return cached, nil
 		}
 		r := p.loadGV(path, kind == modelsKey)
+		r.path, r.url = path, p.paths[path].ServerRelativeURL()
 		if r.err != nil {
 			p.log.Info("Failed to load OpenAPI v3 schema for GroupVersion, skipping", "path", path, "error", r.err)
 		}

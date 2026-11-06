@@ -126,7 +126,7 @@ func (k *MockKubectlCmd) LoadOpenAPISchema(config *rest.Config) (openapi.Resourc
 
 // LoadOpenAPISchemaLazy shares the LoadOpenAPISchema override so a stubbed
 // schema covers both cache engines.
-func (k *MockKubectlCmd) LoadOpenAPISchemaLazy(config *rest.Config) (openapi.Resources, scheme.GVKParser, error) {
+func (k *MockKubectlCmd) LoadOpenAPISchemaLazy(config *rest.Config, _ scheme.GVKParser) (openapi.Resources, scheme.GVKParser, error) {
 	return k.LoadOpenAPISchema(config)
 }
 

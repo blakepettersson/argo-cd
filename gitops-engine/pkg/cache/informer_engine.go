@@ -459,7 +459,7 @@ func (e *informerEngine) flushBatch() {
 // schema is loaded the first time a diff or patch-meta lookup needs it.
 func (e *informerEngine) loadOpenAPISchema() (openapi.Resources, kubescheme.GVKParser, error) {
 	//nolint:wrapcheck // callers wrap
-	return e.c.kubectl.LoadOpenAPISchemaLazy(e.c.config)
+	return e.c.kubectl.LoadOpenAPISchemaLazy(e.c.config, e.c.GetGVKParser())
 }
 
 func (e *informerEngine) startMissingWatches() error {

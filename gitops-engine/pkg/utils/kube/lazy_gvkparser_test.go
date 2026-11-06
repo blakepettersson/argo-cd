@@ -50,7 +50,7 @@ func TestLazyGVKParser_UnknownGV(t *testing.T) {
 	paths := map[string]openapiclient.GroupVersion{
 		"api/v1": &fakeGroupVersion{schemaBytes: validCoreV1Schema},
 	}
-	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()))
+	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()), nil)
 
 	result, err := parser.Type(schema.GroupVersionKind{Group: "nonexistent.io", Version: "v1", Kind: "Foo"})
 	assert.Nil(t, result, "unknown GV should return nil")
@@ -67,7 +67,7 @@ func TestLazyGVKParser_CachesPerGV(t *testing.T) {
 			callCount: &callCount,
 		},
 	}
-	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()))
+	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()), nil)
 
 	cm, err := parser.Type(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
 	require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestLazyGVKParser_LookupResource(t *testing.T) {
 		},
 		"apis/unavailable.io/v1": &fakeGroupVersion{err: errors.New("connection refused")},
 	}
-	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()))
+	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()), nil)
 
 	cm := parser.LookupResource(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})
 	require.NotNil(t, cm)
@@ -124,7 +124,7 @@ func TestLazyGVKParser_ConcurrentAccess(t *testing.T) {
 			callCount: &callCount,
 		},
 	}
-	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()))
+	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()), nil)
 
 	var wg sync.WaitGroup
 	for range 50 {
@@ -156,7 +156,7 @@ func TestLazyGVKParser_FetchFailureCached(t *testing.T) {
 			callCount: &callCount,
 		},
 	}
-	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()))
+	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()), nil)
 
 	result, err := parser.Type(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
 	assert.Nil(t, result, "should return nil on fetch failure")
@@ -167,6 +167,65 @@ func TestLazyGVKParser_FetchFailureCached(t *testing.T) {
 	assert.Nil(t, result, "should return nil from cached error")
 	require.Error(t, err, "should return cached error")
 	assert.Equal(t, int32(1), callCount.Load(), "should NOT have retried")
+}
+
+func TestLazyGVKParser_ReloadKeepsUnchangedGVs(t *testing.T) {
+	log := textlogger.NewLogger(textlogger.NewConfig())
+	gvk := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	var fetches atomic.Int32
+	gv := func(url string) openapiclient.GroupVersion {
+		return &countingFakeGroupVersion{inner: &fakeGroupVersion{schemaBytes: validCoreV1Schema}, callCount: &fetches, url: url}
+	}
+	load := func(p *lazyGVKParser) {
+		t.Helper()
+		got, err := p.Type(gvk)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.NotNil(t, p.LookupResource(gvk))
+	}
+
+	first := newLazyGVKParser(map[string]openapiclient.GroupVersion{"api/v1": gv("/openapi/v3/api/v1?hash=a")}, log, nil)
+	load(first)
+	require.Equal(t, int32(2), fetches.Load(), "parser and models load separately")
+
+	same := newLazyGVKParser(map[string]openapiclient.GroupVersion{"api/v1": gv("/openapi/v3/api/v1?hash=a")}, log, first)
+	load(same)
+	assert.Equal(t, int32(2), fetches.Load(), "unchanged hash reuses both results")
+
+	changed := newLazyGVKParser(map[string]openapiclient.GroupVersion{"api/v1": gv("/openapi/v3/api/v1?hash=b")}, log, same)
+	load(changed)
+	assert.Equal(t, int32(4), fetches.Load(), "changed hash reloads")
+
+	gone := newLazyGVKParser(map[string]openapiclient.GroupVersion{}, log, changed)
+	_, ok := gone.parsers.Load(parserKey + "api/v1")
+	assert.False(t, ok, "removed GroupVersion is dropped")
+
+	noURL := newLazyGVKParser(map[string]openapiclient.GroupVersion{"api/v1": gv("")}, log, nil)
+	load(noURL)
+	fetches.Store(0)
+	load(newLazyGVKParser(map[string]openapiclient.GroupVersion{"api/v1": gv("")}, log, noURL))
+	assert.Equal(t, int32(2), fetches.Load(), "without a hash nothing is reused")
+}
+
+func TestLazyGVKParser_ReloadRetriesFailures(t *testing.T) {
+	log := textlogger.NewLogger(textlogger.NewConfig())
+	var fetches atomic.Int32
+	gv := &retryableFakeGroupVersion{
+		schemas:   []schemaResult{{err: assert.AnError}, {data: validCoreV1Schema}},
+		callCount: &fetches,
+		url:       "/openapi/v3/api/v1?hash=a",
+	}
+	paths := map[string]openapiclient.GroupVersion{"api/v1": gv}
+	gvk := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+
+	first := newLazyGVKParser(paths, log, nil)
+	_, err := first.Type(gvk)
+	require.Error(t, err)
+
+	got, err := newLazyGVKParser(paths, log, first).Type(gvk)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.Equal(t, int32(2), fetches.Load())
 }
 
 func TestLazyGVKParser_BadSchemaDoesNotAffectOtherGVs(t *testing.T) {
@@ -180,7 +239,7 @@ func TestLazyGVKParser_BadSchemaDoesNotAffectOtherGVs(t *testing.T) {
 		"apis/broken.example.io/v1":              &fakeGroupVersion{schemaBytes: []byte(`not valid json at all`)},
 		"apis/unavailable.io/v1beta1":            &fakeGroupVersion{err: errors.New("connection refused")},
 	}
-	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()))
+	parser := newLazyGVKParser(paths, textlogger.NewLogger(textlogger.NewConfig()), nil)
 
 	// The valid GV resolves fine despite the broken siblings.
 	cmType, err := parser.Type(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
@@ -225,6 +284,7 @@ func (f *fakeGroupVersion) ServerRelativeURL() string {
 type countingFakeGroupVersion struct {
 	inner     *fakeGroupVersion
 	callCount *atomic.Int32
+	url       string
 }
 
 func (f *countingFakeGroupVersion) Schema(contentType string) ([]byte, error) {
@@ -233,7 +293,7 @@ func (f *countingFakeGroupVersion) Schema(contentType string) ([]byte, error) {
 }
 
 func (f *countingFakeGroupVersion) ServerRelativeURL() string {
-	return ""
+	return f.url
 }
 
 // schemaResult represents one call's return value.
@@ -247,6 +307,7 @@ type schemaResult struct {
 type retryableFakeGroupVersion struct {
 	schemas   []schemaResult
 	callCount *atomic.Int32
+	url       string
 }
 
 func (f *retryableFakeGroupVersion) Schema(_ string) ([]byte, error) {
@@ -258,7 +319,7 @@ func (f *retryableFakeGroupVersion) Schema(_ string) ([]byte, error) {
 }
 
 func (f *retryableFakeGroupVersion) ServerRelativeURL() string {
-	return ""
+	return f.url
 }
 
 // validCoreV1Schema is a minimal OpenAPI v3 schema for core/v1 ConfigMap.

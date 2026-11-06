@@ -37,8 +37,9 @@ type Kubectl interface {
 	// LoadOpenAPISchema eagerly fetches and parses the whole OpenAPI v2 document.
 	LoadOpenAPISchema(config *rest.Config) (openapi.Resources, scheme.GVKParser, error)
 	// LoadOpenAPISchemaLazy returns one object serving both results, which
-	// fetches a GroupVersion's OpenAPI v3 schema on first use (#19199).
-	LoadOpenAPISchemaLazy(config *rest.Config) (openapi.Resources, scheme.GVKParser, error)
+	// fetches a GroupVersion's OpenAPI v3 schema on first use (#19199). Schemas
+	// prev already loaded are kept if their GroupVersion hash is unchanged.
+	LoadOpenAPISchemaLazy(config *rest.Config, prev scheme.GVKParser) (openapi.Resources, scheme.GVKParser, error)
 	ConvertToVersion(obj *unstructured.Unstructured, group, version string) (*unstructured.Unstructured, error)
 	DeleteResource(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string, deleteOptions metav1.DeleteOptions) error
 	GetResource(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string) (*unstructured.Unstructured, error)
@@ -155,7 +156,7 @@ func (k *KubectlCmd) LoadOpenAPISchema(config *rest.Config) (openapi.Resources, 
 
 // LoadOpenAPISchemaLazy costs one OpenAPI v3 Paths() call up front; schemas
 // are fetched per GroupVersion when first referenced.
-func (k *KubectlCmd) LoadOpenAPISchemaLazy(config *rest.Config) (openapi.Resources, scheme.GVKParser, error) {
+func (k *KubectlCmd) LoadOpenAPISchemaLazy(config *rest.Config, prev scheme.GVKParser) (openapi.Resources, scheme.GVKParser, error) {
 	disco, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create discovery client: %w", err)
@@ -164,7 +165,8 @@ func (k *KubectlCmd) LoadOpenAPISchemaLazy(config *rest.Config) (openapi.Resourc
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get openapi v3 paths: %w", err)
 	}
-	p := newLazyGVKParser(paths, k.Log)
+	prevLazy, _ := prev.(*lazyGVKParser)
+	p := newLazyGVKParser(paths, k.Log, prevLazy)
 	return p, p, nil
 }
 
