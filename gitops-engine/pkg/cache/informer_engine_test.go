@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -793,6 +795,43 @@ func TestBuildInformer_PassesLabelSelector(t *testing.T) {
 	}
 	for _, w := range watches {
 		assert.Equal(t, api.LabelSelector, w, "watch label selector")
+	}
+}
+
+// limitRecordingClient records the Limit of each List call.
+type limitRecordingClient struct {
+	dynamic.ResourceInterface
+	mu     sync.Mutex
+	limits []int64
+}
+
+func (r *limitRecordingClient) List(ctx context.Context, o metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	r.mu.Lock()
+	r.limits = append(r.limits, o.Limit)
+	r.mu.Unlock()
+	return r.ResourceInterface.List(ctx, o)
+}
+
+func TestBuildInformer_HonoursListPageSize(t *testing.T) {
+	for _, pageSize := range []int64{7, 0} {
+		t.Run(strconv.FormatInt(pageSize, 10), func(t *testing.T) {
+			c, client := newInformerTestCache(t, unstructuredPod("nginx", "default"))
+			c.listPageSize = pageSize
+			res := &limitRecordingClient{ResourceInterface: client.Resource(podsGVR)}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			informer, _ := c.buildInformer(ctx, client, res, podsAPI(), "")
+			go informer.RunWithContext(ctx)
+			require.True(t, cache.WaitForCacheSync(ctx.Done(), informer.HasSynced))
+
+			res.mu.Lock()
+			defer res.mu.Unlock()
+			require.NotEmpty(t, res.limits)
+			for _, l := range res.limits {
+				assert.Equal(t, pageSize, l)
+			}
+		})
 	}
 }
 

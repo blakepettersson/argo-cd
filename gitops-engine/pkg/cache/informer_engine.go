@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,8 +97,8 @@ type pendingEvent struct {
 
 // logIgnoredSettings logs, once, the legacy-only settings that differ from
 // their gitops-engine default. Informer mode does not read them: the
-// reflector does its own paging, retry and resync. listSemaphore and the
-// batching settings are honoured and not listed.
+// reflector does its own prefetch, retry and resync. listPageSize,
+// listSemaphore and the batching settings are honoured and not listed.
 func (e *informerEngine) logIgnoredSettings() {
 	if e.ignoredSettingsLogged {
 		return
@@ -107,9 +106,6 @@ func (e *informerEngine) logIgnoredSettings() {
 	e.ignoredSettingsLogged = true
 	c := e.c
 	var ignored []string
-	if c.listPageSize != defaultListPageSize {
-		ignored = append(ignored, "listPageSize")
-	}
 	if c.listPageBufferSize != defaultListPageBufferSize {
 		ignored = append(ignored, "listPageBufferSize")
 	}
@@ -118,9 +114,6 @@ func (e *informerEngine) logIgnoredSettings() {
 	}
 	if c.listRetryUseBackoff {
 		ignored = append(ignored, "listRetryUseBackoff")
-	}
-	if c.listRetryFunc == nil || reflect.ValueOf(c.listRetryFunc).Pointer() != reflect.ValueOf(ListRetryFuncNever).Pointer() {
-		ignored = append(ignored, "listRetryFunc")
 	}
 	if c.watchResyncTimeout != defaultWatchResyncTimeout {
 		ignored = append(ignored, "watchResyncTimeout")
@@ -732,6 +725,11 @@ func (e *informerEngine) buildInformer(ctx context.Context, client dynamic.Inter
 				return nil, fmt.Errorf("acquire list semaphore for %s[%s]: %w", api.GroupKind, namespaceDescription(ns), err)
 			}
 			defer c.listSemaphore.Release(1)
+			// Limit is 0 when the reflector deliberately lists unpaginated
+			// from the watch cache; only resize the pages it asked for.
+			if o.Limit > 0 {
+				o.Limit = c.listPageSize
+			}
 			o.LabelSelector = api.LabelSelector
 			return resClient.List(ctx, o)
 		},

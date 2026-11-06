@@ -256,12 +256,13 @@ stringData:
       initial lists before failing; the failed sync is retried. The valid value is in the format of Go time duration
       string. The default value is `5m`.
     * These cluster cache settings are ignored, and the controller logs the ones set to a non-default value on the
-      first sync: list page size (`ARGOCD_CLUSTER_CACHE_LIST_PAGE_SIZE`), list page buffer size
-      (`ARGOCD_CLUSTER_CACHE_LIST_PAGE_BUFFER_SIZE`), list retry limit (`ARGOCD_CLUSTER_CACHE_ATTEMPT_LIMIT`), list
-      retry backoff (`ARGOCD_CLUSTER_CACHE_RETRY_USE_BACKOFF`), the list retry function and the watch resync timeout
-      (`ARGOCD_CLUSTER_CACHE_WATCH_RESYNC_DURATION`). `ARGOCD_CLUSTER_CACHE_LIST_SEMAPHORE` is honoured for the
-      classic paged list path; when client-go uses WatchList streaming for the initial state, requests bypass it
-      (streaming does not produce the page-sized allocation spikes the semaphore exists to bound).
+      first sync: list page buffer size (`ARGOCD_CLUSTER_CACHE_LIST_PAGE_BUFFER_SIZE`), list retry limit
+      (`ARGOCD_CLUSTER_CACHE_ATTEMPT_LIMIT`), list retry backoff (`ARGOCD_CLUSTER_CACHE_RETRY_USE_BACKOFF`) and the
+      watch resync timeout (`ARGOCD_CLUSTER_CACHE_WATCH_RESYNC_DURATION`). Failed lists are retried with client-go's
+      backoff until `ARGOCD_CLUSTER_CACHE_INFORMER_SYNC_TIMEOUT`.
+    * `ARGOCD_CLUSTER_CACHE_LIST_PAGE_SIZE` and `ARGOCD_CLUSTER_CACHE_LIST_SEMAPHORE` apply to the classic paged list
+      path. When client-go uses WatchList streaming for the initial state, neither applies (streaming does not
+      produce the page-sized allocation spikes the semaphore exists to bound).
     * `ARGOCD_CLUSTER_CACHE_BATCH_EVENTS_PROCESSING` batches watch events as in the legacy engine. Events for the
       same resource within one `ARGOCD_CLUSTER_CACHE_EVENTS_PROCESSING_INTERVAL` are merged into the latest one, and
       each `argocd_resource_events_processing` sample covers one batch. The initial list is never batched. Without

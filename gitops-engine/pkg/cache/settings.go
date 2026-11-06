@@ -230,10 +230,12 @@ const (
 	// cachedResource at intake. Experimental — see
 	// https://github.com/argoproj/argo-cd/issues/19199.
 	//
-	// ModeInformer ignores listPageSize, listPageBufferSize, listRetryLimit,
+	// ModeInformer ignores listPageBufferSize, listRetryLimit,
 	// listRetryUseBackoff, listRetryFunc and watchResyncTimeout, and logs the
-	// ones set to a non-default value on the first sync. listSemaphore,
-	// batchEventsProcessing and eventProcessingInterval are honoured.
+	// ones set to a non-default value on the first sync (listRetryFunc only
+	// matters with retries, so it isn't logged). listPageSize, listSemaphore,
+	// batchEventsProcessing and eventProcessingInterval are honoured;
+	// listPageSize and listSemaphore only apply when WatchList isn't used.
 	ModeInformer
 )
 
