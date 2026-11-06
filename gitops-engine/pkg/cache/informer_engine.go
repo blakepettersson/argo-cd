@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubetypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -584,9 +585,26 @@ func (e *informerEngine) startInformersForAPILocked(ctx context.Context, api kub
 	c.namespacedResources.Store(&namespacedResources)
 
 	for _, si := range informers {
-		go si.informer.RunWithContext(si.ctx)
+		go e.runInformer(si)
 	}
 	return nil
+}
+
+// runInformer starts si once a listSemaphore slot is free and holds the slot
+// until its initial events are delivered. Like legacy listResources holding a
+// slot for a whole list, this bounds concurrent initial loads per cluster,
+// whether the reflector pages or streams them (WatchList). Runs in its own
+// goroutine: the slot can't be awaited under c.lock, which syncing needs.
+func (e *informerEngine) runInformer(si sharedInformer) {
+	sem := e.c.listSemaphore
+	if err := sem.Acquire(si.ctx, 1); err != nil {
+		return // cancelled while queued
+	}
+	defer sem.Release(1)
+	go si.informer.RunWithContext(si.ctx)
+	_ = wait.PollUntilContextCancel(si.ctx, 100*time.Millisecond, true, func(context.Context) (bool, error) {
+		return si.registration.HasSynced(), nil
+	})
 }
 
 // sharedInformer couples a SharedIndexInformer with the engine event
@@ -713,18 +731,20 @@ func (e *informerEngine) resolveSyncResult(synced bool, watched []watchedInforme
 // WatchList semantics are supported.
 func (e *informerEngine) buildInformer(ctx context.Context, client dynamic.Interface, resClient dynamic.ResourceInterface, api kube.APIResourceInfo, ns string) (cache.SharedIndexInformer, cache.ResourceEventHandlerRegistration) {
 	c := e.c
+	// Set below, before the informer can run.
+	var registration cache.ResourceEventHandlerRegistration
 	lw := &cache.ListWatch{
-		// Wrap List with store.listSemaphore so initial-list memory pressure
-		// stays bounded across many (GK, ns) informers. Legacy listResources
-		// does the same — without it, every informer's reflector calls List
-		// concurrently and a discovery-heavy cluster (hundreds of GVRs) spikes
-		// memory during startup. Reflector pager calls List once per page; the
-		// semaphore holds for one page at a time, matching legacy behavior.
+		// The initial list is bounded by runInformer's slot. Relists (e.g.
+		// after an expired resourceVersion) take a slot per page, so a mass
+		// relist after an apiserver restart stays bounded too. Skipping the
+		// initial list here avoids needing two slots at once.
 		ListWithContextFunc: func(ctx context.Context, o metav1.ListOptions) (runtime.Object, error) {
-			if err := c.listSemaphore.Acquire(ctx, 1); err != nil {
-				return nil, fmt.Errorf("acquire list semaphore for %s[%s]: %w", api.GroupKind, namespaceDescription(ns), err)
+			if registration.HasSynced() {
+				if err := c.listSemaphore.Acquire(ctx, 1); err != nil {
+					return nil, fmt.Errorf("acquire list semaphore for %s[%s]: %w", api.GroupKind, namespaceDescription(ns), err)
+				}
+				defer c.listSemaphore.Release(1)
 			}
-			defer c.listSemaphore.Release(1)
 			// Limit is 0 when the reflector deliberately lists unpaginated
 			// from the watch cache; only resize the pages it asked for.
 			if o.Limit > 0 {
@@ -750,10 +770,6 @@ func (e *informerEngine) buildInformer(ctx context.Context, client dynamic.Inter
 		// closure-based ListWatch hides the client's capability marker and
 		// the reflector would stream against fakes and hang.
 		//
-		// Note the listSemaphore above only bounds the classic paged-List
-		// path; under watch-list the initial state streams object-by-object,
-		// which doesn't produce the page-sized allocation spikes the
-		// semaphore exists to bound.
 		cache.ToListWatcherWithWatchListSemantics(lw, client),
 		&unstructured.Unstructured{},
 		cache.SharedIndexInformerOptions{

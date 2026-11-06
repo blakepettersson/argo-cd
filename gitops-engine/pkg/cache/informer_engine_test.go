@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1415,28 +1416,87 @@ func TestGetManagedLiveObjs_PostInvalidateServesStaleCache(t *testing.T) {
 }
 
 // TestBuildInformer_ListAcquiresSemaphore verifies that the informer's
-// ListWithContextFunc acquires c.listSemaphore before calling resClient.List,
-// matching legacy listResources. Without this gate, every
-// (GroupKind, ns) reflector's initial List runs concurrently — a discovery-
-// heavy cluster spikes memory and a user who tuned listSemaphore down sees
-// OOMs after enabling ModeInformer.
-func TestBuildInformer_ListAcquiresSemaphore(t *testing.T) {
+// runInformer holds a listSemaphore slot from start until the initial events
+// are delivered, as legacy listResources holds one for a whole list. The List
+// wrapper must not take a second slot for the initial list.
+func TestRunInformer_HoldsSlotUntilSynced(t *testing.T) {
 	c, client := newInformerTestCache(t, unstructuredPod("nginx", "default"))
-
-	// Replace the listSemaphore with a tracking version.
 	tracker := &trackingSemaphore{}
 	c.listSemaphore = tracker
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	informer, _ := c.buildInformer(ctx, client, client.Resource(podsGVR), podsAPI(), "")
-	go informer.RunWithContext(ctx)
-	require.True(t, cache.WaitForCacheSync(ctx.Done(), informer.HasSynced))
+	informer, registration := c.buildInformer(ctx, client, client.Resource(podsGVR), podsAPI(), "")
+	informerEngineOf(c).runInformer(sharedInformer{ctx: ctx, cancel: cancel, informer: informer, registration: registration})
 
-	acquired := tracker.acquireCount()
-	released := tracker.releaseCount()
-	assert.Positive(t, acquired, "ListWithContextFunc must acquire the listSemaphore for each List call")
-	assert.Equal(t, acquired, released, "every Acquire must be paired with a Release (defer in the wrapper)")
+	assert.True(t, registration.HasSynced())
+	assert.Equal(t, 1, tracker.acquireCount(), "one slot for the whole initial load")
+	assert.Equal(t, 1, tracker.releaseCount())
+}
+
+// nsListRecorder calls onList before each List.
+type nsListRecorder struct {
+	dynamic.ResourceInterface
+	ns     string
+	onList func(ns string)
+}
+
+func (r *nsListRecorder) List(ctx context.Context, o metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	r.onList(r.ns)
+	return r.ResourceInterface.List(ctx, o)
+}
+
+// With one slot, an informer may only start listing once every informer that
+// listed before it has synced.
+func TestRunInformer_BoundsConcurrentInitialLoads(t *testing.T) {
+	namespaces := []string{"a", "b", "c"}
+	var seed []runtime.Object
+	for _, ns := range namespaces {
+		seed = append(seed, unstructuredPod("p", ns))
+	}
+	c, client := newInformerTestCache(t, seed...)
+	c.listSemaphore = semaphore.NewWeighted(1)
+	e := informerEngineOf(c)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	regs := map[string]cache.ResourceEventHandlerRegistration{}
+	var listed []string
+	overlaps := 0
+	onList := func(ns string) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, other := range listed {
+			if other != ns && !regs[other].HasSynced() {
+				overlaps++
+			}
+		}
+		listed = append(listed, ns)
+	}
+	var sis []sharedInformer
+	for _, ns := range namespaces {
+		res := &nsListRecorder{ResourceInterface: client.Resource(podsGVR).Namespace(ns), ns: ns, onList: onList}
+		informer, reg := c.buildInformer(ctx, client, res, podsAPI(), ns)
+		regs[ns] = reg
+		sis = append(sis, sharedInformer{ctx: ctx, cancel: cancel, informer: informer, registration: reg})
+	}
+	for _, si := range sis {
+		go e.runInformer(si)
+	}
+	require.Eventually(t, func() bool {
+		for _, reg := range regs {
+			if !reg.HasSynced() {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, listed, len(namespaces))
+	assert.Zero(t, overlaps, "initial loads overlapped despite a single slot")
 }
 
 // trackingSemaphore is a WeightedSemaphore that counts Acquire/Release

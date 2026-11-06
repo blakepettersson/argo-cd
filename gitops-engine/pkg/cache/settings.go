@@ -235,7 +235,8 @@ const (
 	// ones set to a non-default value on the first sync (listRetryFunc only
 	// matters with retries, so it isn't logged). listPageSize, listSemaphore,
 	// batchEventsProcessing and eventProcessingInterval are honoured;
-	// listPageSize and listSemaphore only apply when WatchList isn't used.
+	// listSemaphore bounds concurrent initial loads, and listPageSize only
+	// applies when WatchList isn't used.
 	ModeInformer
 )
 

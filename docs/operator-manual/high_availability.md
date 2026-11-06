@@ -260,9 +260,9 @@ stringData:
       (`ARGOCD_CLUSTER_CACHE_ATTEMPT_LIMIT`), list retry backoff (`ARGOCD_CLUSTER_CACHE_RETRY_USE_BACKOFF`) and the
       watch resync timeout (`ARGOCD_CLUSTER_CACHE_WATCH_RESYNC_DURATION`). Failed lists are retried with client-go's
       backoff until `ARGOCD_CLUSTER_CACHE_INFORMER_SYNC_TIMEOUT`.
-    * `ARGOCD_CLUSTER_CACHE_LIST_PAGE_SIZE` and `ARGOCD_CLUSTER_CACHE_LIST_SEMAPHORE` apply to the classic paged list
-      path. When client-go uses WatchList streaming for the initial state, neither applies (streaming does not
-      produce the page-sized allocation spikes the semaphore exists to bound).
+    * `ARGOCD_CLUSTER_CACHE_LIST_SEMAPHORE` bounds how many informers per cluster load their initial state at once,
+      whether client-go pages it or streams it (WatchList). Later relists take a slot per page.
+      `ARGOCD_CLUSTER_CACHE_LIST_PAGE_SIZE` applies only to paged lists.
     * `ARGOCD_CLUSTER_CACHE_BATCH_EVENTS_PROCESSING` batches watch events as in the legacy engine. Events for the
       same resource within one `ARGOCD_CLUSTER_CACHE_EVENTS_PROCESSING_INTERVAL` are merged into the latest one, and
       each `argocd_resource_events_processing` sample covers one batch. The initial list is never batched. Without
